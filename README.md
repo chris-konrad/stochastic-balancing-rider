@@ -109,11 +109,11 @@ The figure below explains all steps of the pipeline. Some scripts need to be exe
 
 ![processing pipeline](./assets/analysis-flowchart.png)
 
-### Authors
+## Authors
 
 - Christoph M. Konrad (formerly Schmidt), c.m.konrad@tudelft.nl
 
-### License
+## License
 
 This software is licensed under the terms of the [MIT License](LICENSE).
 
