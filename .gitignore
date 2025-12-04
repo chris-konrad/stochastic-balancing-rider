@@ -17,9 +17,6 @@
 *.pickle
 *.parquet
 
-#YAML config files
-*.yaml
-
 # Excel
 *.xlsx
 

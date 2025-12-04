@@ -1,0 +1,160 @@
+dir_data:       #Add the path to the data directory
+dir_results:    #Add the path to the result directory
+participants: ['314', '489', '536', '628', '781', '824', '851', '887', '960', '981']
+models:
+    BR0:    #full balancing rider model from the paper
+        label: '$\mathrm{BR}_0$'
+        bikemodel: 'balancingrider'
+        response_time_defintion: csteer
+    BR1:    #reduced balancing rider model in the paper
+        label: '$\mathrm{BR}_1$'
+        bikemodel: 'balancingrider'
+        response_time_defintion: csteer
+    PP0:    #corresponding to PP in the paper
+        label: '$\mathrm{PP0}$'
+        bikemodel: 'planarpoint'
+        response_time_defintion: yecomp
+    PP1:    #discontinued version with different response time estimation
+        label: '$\mathrm{PP}$'
+        bikemodel: 'planarpoint'
+        response_time_defintion: yrflank
+random_seed: 42
+processing:
+    step-1-1_raw-data-processing:
+        reference_location: [51.999370, 4.370451]   # Location of the origin of the local reference frame [Lat, Long]
+        reference_rotation: 66.0                    # Rotation of the local reference frame relative to Lat/Long
+        filter_settings:
+        # settings of the Unscented Kalman Filter
+            integration_method: midpoint
+            measurement_noise_scale: 
+                GNSS:
+                    x: 0.1
+                    y: 0.1
+                IMU: #Datasheet values from https://docs.sparkfun.com/SparkFun_VR_IMU_Breakout_BNO086_QWIIC/assets/component_documentation/BNO080_085-Datasheet_v1.16.pdf
+                    roll: 0.061
+                    yaw: 0.061
+                    gyro: 0.054
+                    accel: 0.30
+                speedometer:
+                    v: 0.05
+                steer:
+                    rate: 0.05
+                    angle: 0.03
+            process_noise_level:
+                x: 0.001
+                y: 0.001
+                psi: 0.001
+                dpsi: 0.01
+                phi: 0.00001 # force roll to follow dynamics rather then measurement
+                dphi: 0.00005 # force roll to follow dynamics rather then measurement
+                delta: 0.01
+                ddelta: 0.05
+                v: 0.001
+                dv: 0.05
+    step-1-2_step-response-extraction:
+        min_duration: 2.5           # minimum duration [s] of one step respones, even if this includes the next step
+        min_yaw_command: 8          # minimum yaw angle step [deg] for the leading step and maximum yaw angle step for the next step  
+        min_speed_range: 0.8333     # minimum speed range (max - min) for step responses to be included
+        warmup_time: 0.5            # duration before the command to be included
+    step-2-1_estimate-response-times:
+        definitions:
+            countersteer:
+                feature: ddelta
+                threshold: -0.4             # float for static threshold, [feature, time] for dynamic threshold based on a kinematic feature value at a certain time.
+                threshold_type: min
+                min_response_time: 0.1
+                max_response_time: 0.6
+                def_tag: csteer
+            yaw_rising_flank:
+                feature: dpsi
+                threshold: 0.4              # float for static threshold, [feature, time] for dynamic threshold based on a kinematic feature value at a certain time.
+                threshold_type: max
+                min_response_time: 0.4
+                max_response_time: 1.3
+                def_tag: yrflank
+            yaw_error_compensation:
+                feature: psi
+                threshold: ['psi_c', 0]     # float for static threshold, [feature, time] for dynamic threshold based on a kinematic feature value at a certain time.
+                threshold_type: max
+                min_response_time: 0.4
+                max_response_time: 1.5
+                def_tag: yecomp
+    step-2-2-1_identify-control-parameters:
+        PP0:
+            model: 'planarpoint'
+            gain_guess_mode: 10             #number of gain guesses
+            gain_search_limits: 
+                k_psi: [0.0,20.0]
+            feasible_initial_guesses: True
+            opty_config:
+                error_weight: 0.05
+                integration_method: midpoint
+            ipopt_config:
+                max_iter: 1000
+            plot_mode: 'best'
+        PP1:
+            model: 'planarpoint'
+            gain_guess_mode: 10             #number of gain guesses
+            gain_search_limits: 
+                k_psi: [0.0,20.0]
+            feasible_initial_guesses: True
+            opty_config:
+                error_weight: 0.05
+                integration_method: midpoint
+            ipopt_config:
+                max_iter: 1000
+            plot_mode: 'best'     
+        BR0:
+            model: 'balancingrider'
+            gain_guess_mode: 30             #number of gain guesses
+            gain_search_limits:             #[[-250,250],[-250,250],[-250,250],[-250,250],[-250,250]]
+                k_phi: [-250.0, 250]
+                k_delta: [-250.0, 250]
+                k_deltadot: [-250.0, 250]
+                k_phidot: [-250.0, 250]
+                k_psi: [-250.0, 250]
+            feasible_initial_guesses: True
+            opty_config:
+                error_weight: 0.05
+                integration_method: midpoint
+            ipopt_config:
+                max_iter: 3000
+            plot_mode: 'best'
+        BR1:
+            model: 'balancingrider'
+            gain_guess_mode: 30             #number of gain guesses
+            gain_search_limits:             #[[-250,0],[0,250],[-250,250],[0,0],[-250,0]]
+                k_phi: [-250.0, 0.0]
+                k_delta: [0.0, 250.0]
+                k_phidot: [-250.0, 250.0]
+                k_deltadot: [0.0,0.0]
+                k_psi: [-250.0, 0.0]
+            feasible_initial_guesses: True
+            opty_config:
+                error_weight: 0.05
+                integration_method: midpoint
+                known_gain_map:
+                    k_deltadot: 0.0
+            ipopt_config:
+                max_iter: 3000
+            plot_mode: 'best'
+    step-3-1_prepare-poles:
+        BR0: 
+            threshold_objective: 0.0002
+        BR1:
+            threshold_objective: 0.0002
+        PP0:
+            threshold_objective: 0.005
+        PP1:
+            threshold_objective: 0.005
+    step-3-2_model-pole-distribution:
+        models_for_comparison: ['BR0', 'BR1', 'PP0']
+        max_gmm_components: 10      # maximum number of GMM componentens for cross-validation grid-search.
+        covariance_types: ['full']  # GMM covariance types for cross-validation grid-search. See: https://scikit-learn.org/stable/auto_examples/mixture/plot_gmm_covariances.html
+    step-4-1_test-predicted-trajectory-distribution:
+        models_for_comparison: ['BR0', 'BR1', 'PP0']
+        n_predictions: 1000
+    step-4-2_test-obstacle-avoidance:
+        models_for_comparison: ['BR0', 'BR1', 'PP0']
+        n_predictions: 1000
+        speed_kmh: 11
