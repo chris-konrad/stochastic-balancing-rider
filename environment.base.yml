@@ -1,0 +1,17 @@
+
+name: rcid
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13   #Should also work with other Python version. 3.13 was used for generating the results.
+  - filterpy
+  - matplotlib
+  - numpy
+  - opty
+  - pandas
+  - permetrics
+  - pyyaml
+  - scipy
+  - shapely
+  - scikit-learn
+  - sympy

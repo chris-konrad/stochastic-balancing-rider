@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rcid"
+description = "Rider control identification based on experimental data from zigzag riding experiments"
+readme = "README.md"
+version = "1.0.0"
+license = {file = "LICENSE"}
+authors = [
+	{name = "Christoph M. Konrad", email = "c.m.konrad@tudelft.nl"}
+]
+requires-python = ">3.13"
+
+dependencies = [
+    "cyclistsocialforce>=2.0.1,<2.1",
+    "filterpy",
+    "matplotlib",
+    "mypyutils>=1.0,<1.1",
+    "numpy",
+    "opty",
+    "pandas",
+    "permetrics",
+    "pypaperutils>=1.1,<1.2",
+    "pytrafficutils>=0.1,<0.2",
+    "PyYAML",
+    "scipy",
+    "shapely",
+    "scikit-learn",
+    "sympy",
+    "trajdatamanager>=1.1,<1.2",
+]
+
+
+[project.optional-dependencies]
+can-decoding = [
+    "asammdf"
+]
+
+	
+[tool.setuptools.packages.find]
+where = ["src"]  
