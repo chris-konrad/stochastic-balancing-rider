@@ -89,6 +89,10 @@ To run the analysis on the original data, visit the [data repository](https://do
 
 To create your own data, consult the paper and/or the [data repository](https://doi.org/10.4121/f881dd80-b9f5-4322-9fd5-192034c9717f) for detailed information on the experimental setup.
 
+#### Bicycle Parameters
+
+The physical parameters of the experiment bicycle (masses, inertia, dimensions) including a rider with human average weight and height are available in `packages\rcid\src\rcid\params`.  The bicycle parameters are derived from` data/bicycles/Balanceassistv1`from [moorepants/BicycleParameters](https://github.com/moorepants/BicycleParameters). The rider is based on`data/riders/Jason`the same repository, rescaled to average human height and weight using the`measurementconversionfactor` from [chrisdembia/yeadon](https://github.com/chrisdembia/yeadon/). Refer to the BicycleParameters [documentation](https://bicycleparameters.readthedocs.io/stable/data.html) for detailed data specification.
+
 #### Analysis Configuration
 
 The analysis pipeline includes a large number of configurable parameters. The parameters used for generating the results of the publication are defined in `/scripts/config.yaml`. To run the analysis on your system, set the `dir_data` and `dir_results` variables to the directory containing the downloaded data (i.e. the directory containing `/raw/...` and/or `/processed/...`) and the desired output directory for results. Then, pass the config file to each script in the processing pipeline using the `--config` option.
@@ -118,6 +122,8 @@ The figure below explains all steps of the pipeline. Some scripts need to be exe
 This software is licensed under the terms of the [MIT License](LICENSE).
 
 The pole model parameters under `/assets/pole_models/` are a copy of the parameters published in the data [data repository](https://doi.org/10.4121/f881dd80-b9f5-4322-9fd5-192034c9717f), licensced CC-BY.
+
+The bicycle parameters in `/packages/rcid/src/rcid/params` are derived from data provided by Jason Moore in [moorepants/BicycleParameters](https://github.com/moorepants/BicycleParameters), licensed under the [BSD-2-clause]() license.
 
 ## Citation
 

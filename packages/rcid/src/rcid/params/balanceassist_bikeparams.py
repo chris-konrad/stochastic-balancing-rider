@@ -1,3 +1,13 @@
+"""
+The following parameters of the balanceassist bike with an average human rider
+were derived from BicycleParamters (Jason Moore) using:
+
+- https://github.com/moorepants/BicycleParameters/tree/master/data/bicycles/Balanceassistv1
+- https://github.com/moorepants/BicycleParameters/tree/master/data/riders/Jason/
+
+which is made available under the BSD-2-Clause license reproduced in the directory of this module.
+/rcid/src/rcid/params/LICENSE.txt
+""" 
 balanceassistv1_with_averagerider = dict(
   IBxx = 16.136560964517308,
   IBxz = -2.5375819134691833,
