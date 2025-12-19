@@ -123,7 +123,7 @@ This software is licensed under the terms of the [MIT License](https://github.co
 
 The pole model parameters under `/assets/pole_models/` are a copy of the parameters published in the data [data repository](https://doi.org/10.4121/f881dd80-b9f5-4322-9fd5-192034c9717f), licensced CC-BY.
 
-The bicycle parameters in `/packages/rcid/src/rcid/params` are derived from data provided by Jason Moore in [moorepants/BicycleParameters](https://github.com/moorepants/BicycleParameters), licensed under the [BSD-2-clause]() license.
+The bicycle parameters in `/packages/rcid/src/rcid/params` are derived from data provided by Jason Moore in [moorepants/BicycleParameters](https://github.com/moorepants/BicycleParameters), licensed under the [BSD-2-clause](https://github.com/chris-konrad/stochastic-balancing-rider/blob/main/packages/rcid/src/rcid/params/LICENSE.txt) license.
 
 ## Citation
 
