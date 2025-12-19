@@ -119,7 +119,7 @@ The figure below explains all steps of the pipeline. Some scripts need to be exe
 
 ## License
 
-This software is licensed under the terms of the [MIT License](LICENSE).
+This software is licensed under the terms of the [MIT License](https://github.com/chris-konrad/stochastic-balancing-rider/blob/main/LICENSE).
 
 The pole model parameters under `/assets/pole_models/` are a copy of the parameters published in the data [data repository](https://doi.org/10.4121/f881dd80-b9f5-4322-9fd5-192034c9717f), licensced CC-BY.
 
