@@ -1,6 +1,8 @@
 # Stochastic Control Behavior of the Balancing Rider for Cycling Safety in Traffic Simulation
 
-This repository contains the **research code** corresponding to the publication *Stochastic Control Behavior of the Balancing Rider for Cycling Safety in Traffic Simulation* submitted to Transporation Research Part C: Emerging Technologies. It contains scripts and a modular Python package for:
+[![DOI](https://data.4tu.nl/v3/datasets/22215562/doi-badge.svg)](https://doi.org/10.4121/22215562)
+
+This repository contains the **research code** corresponding to the publication *Stochastic Control Behavior of the Balancing Rider for Cycling Safety in Traffic Simulation*. It contains scripts and a modular Python package for:
 
 - processing of raw data from our cycling experiment.
 
