@@ -1,6 +1,6 @@
 # Stochastic Control Behavior of the Balancing Rider for Cycling Safety in Traffic Simulation
 
-[![DOI](https://data.4tu.nl/v3/datasets/22215562/doi-badge.svg)](https://doi.org/10.4121/22215562)
+[![DOI](https://data.4tu.nl/v3/datasets/f881dd80-b9f5-4322-9fd5-192034c9717f/doi-badge.svg)](https://doi.org/10.4121/f881dd80-b9f5-4322-9fd5-192034c9717f)
 
 This repository contains the **research code** corresponding to the publication *Stochastic Control Behavior of the Balancing Rider for Cycling Safety in Traffic Simulation*. It contains scripts and a modular Python package for:
 
@@ -12,7 +12,7 @@ This repository contains the **research code** corresponding to the publication 
 
 - testing the predictive power of our stochstic Balancing Rider model
 
-Raw data, processed data and results can be found in the corresponding **data repository** hosted on 4TU Research Data, DOI: [10.4121/f881dd80-b9f5-4322-9fd5-192034c9717f](https://doi.org/10.4121/f881dd80-b9f5-4322-9fd5-192034c9717f)
+Raw data, processed data, results, and a frozen copy of this repository is archived at 4TU Research Data, DOI: [10.4121/f881dd80-b9f5-4322-9fd5-192034c9717f](https://doi.org/10.4121/f881dd80-b9f5-4322-9fd5-192034c9717f)
 
 ### Disclaimer
 
