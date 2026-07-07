@@ -9,7 +9,6 @@ dependencies:
   - numpy
   - opty
   - pandas
-  - permetrics
   - pyyaml
   - scipy
   - shapely
