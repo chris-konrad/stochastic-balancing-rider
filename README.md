@@ -29,7 +29,13 @@ The repository contains research code not ready for production. Next to the acti
    conda activate rcid
    ```
 
-3. Install custom dependencies. This repository depends on a few custom packages that are not available on PyPi or conda-forge. Navigate to their public repositories on GitHub and follow installation instructions there to install them manually. Make sure to install the correct version specified in the `/packages/rcid/pyproject.toml`.
+3. Install missing dependencies from PyPi:
+   
+   ```shell
+   pip install --no-deps permetrics
+   ```
+
+4. Install custom dependencies. This repository depends on a few custom packages that are not available on PyPi or conda-forge. Navigate to their public repositories on GitHub and follow installation instructions there to install them manually. Make sure to install the correct version specified in the `/packages/rcid/pyproject.toml`.
    
    - `mypyutils` [GitHub](https://github.com/chris-konrad/mypyutils)
    
@@ -41,7 +47,7 @@ The repository contains research code not ready for production. Next to the acti
    
    - `cyclistsocialforce` [GitHub](https://github.com/chris-konrad/cyclistsocialforce)
 
-4. Install the `rcid` (Rider Control IDentification) package by navigating to its directory (`/packages/rcid`) and calling. Add `-e` for an editable install.
+5. Install the `rcid` (Rider Control IDentification) package by navigating to its directory (`/packages/rcid`) and calling. Add `-e` for an editable install.
    
    ```shell
    pip install . 
