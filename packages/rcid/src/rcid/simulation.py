@@ -506,7 +506,7 @@ class LeeObstacleAvoidance(FixedSpeedStaticObstacleAvoidance):
     ----------
 
     Lee, O., Rasch, A., Schwab, A. L., & Dozza, M. (2020). Modelling cyclists’ comfort zones 
-    from obstacle avoidance manoeuvres. Accident Analysis & Prevention, 144, 105609. https://doi.org/distance
+    from obstacle avoidance manoeuvres. Accident Analysis & Prevention, 144, 105609. https://doi.org/10.1016/j.aap.2020.105609
     """
 
     INITIAL_CONDITION = np.array([-20,0,0,0,0,0,0,0])   # The moving cyclist starts 20 m behind the stationary cyclist at (0,0)
