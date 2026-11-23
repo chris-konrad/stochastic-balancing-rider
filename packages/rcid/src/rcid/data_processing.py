@@ -20,7 +20,7 @@ import sympy.physics.mechanics as me
 from sklearn.cluster import DBSCAN
 from sklearn.linear_model import RANSACRegressor
 from scipy.signal import correlate
-from trajdatamanager.datamanager import (
+from trajdatamanager.gnss import (
     DataManager,
     RTKLibGNSSManager,
     Track,
@@ -756,6 +756,9 @@ class RawDataProcessor:
             self.t_begin, self.t_end, criterion="overlap"
         )
         self.filenames_bike_gnss = [trk.track_id for trk in seq.tracks]
+        print("    Used gnss logs:")
+        for f in self.filenames_bike_gnss:
+            print(f"        {f}")
         trk = seq.serialize()
         trk.crop_to_timespan(self.t_begin, self.t_end)
 
