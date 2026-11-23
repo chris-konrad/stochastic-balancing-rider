@@ -8,6 +8,7 @@ Helper functions
 import os
 import yaml
 import numpy as np
+import pandas as pd
 
 from argparse import ArgumentParser
 
@@ -17,7 +18,7 @@ T_S = 0.01
 def get_default_parser(scriptname="", config=True, save=True, plot=True, model=False, polemodel=False, program_info=""):
     """ Return an argument parser that can be reused for scripts within the scope of this module
     """
-    RIDERBIKEMODELS = ['BR0', 'BR1', 'PP0', 'PP1', 'PP2']
+    RIDERBIKEMODELS = ['BR0', 'BR1', 'BR2', 'BR4', 'BR5', 'PP0', 'PP1', 'PP2']
     POLEMODELS = ['AngMag5', 'AngMag5GivenV', 'ImRe5', 'ImRe5GivenV', 'Re1', 'Re1GivenV']
 
     parser = ArgumentParser(prog = f"Run script {scriptname}. {program_info}")
@@ -27,6 +28,8 @@ def get_default_parser(scriptname="", config=True, save=True, plot=True, model=F
     if plot:
         parser.add_argument("-p", "--plot", action='store_true', 
                             help="Plot (intermediate) results.")
+        parser.add_argument("--interactive", action="store_true", 
+                            help="Block execution at the end of the script to inspect plots.")
     if save:
         parser.add_argument("-s", "--save", action='store_true', 
                             help="Save generated results and figures to disk.")
@@ -144,3 +147,36 @@ def apply_timeshift(n_timeshift, data_dict, keys, n_samples_max = None):
     data_dict['t'] = data_dict['t'] - data_dict['t'][0]
     
     return data_dict
+
+
+def load_response_times_from_file(config, model, paths, sample_ids):
+    """ Load the precomputed response times for a selected model. Return the maximum of all models as evaluation range limit. 
+    """
+    rtdef = config['models'][model]['response_time_definition']
+    rtdef_set = {config['models'][m]['response_time_definition'] for m in config['models']}
+
+    rtdata = {d: pd.read_csv(paths.getfilepath_reactiontimes(d), index_col = False).set_index('sample_id') for d in rtdef_set}
+    
+    response_time_shift = []
+
+    for split in sample_ids:
+
+        rt_values = []
+        for d in rtdef_set:
+            df = rtdata[d]
+            try:
+                rt = df.loc[split, 'response_time_s']
+            except KeyError:
+                raise ValueError(f"sample_id '{split}' not found in response time file '{d}'")
+            shift = int(round(rt/T_S))
+            rt_values.append(shift)
+
+            if d == rtdef:
+                row = [split, rt, shift]
+
+        row.append(np.max(rt_values))
+        response_time_shift.append(row)
+
+    response_time_shift = pd.DataFrame(response_time_shift, columns=['sample_id', 'response_time', 'rt_index_shift', 'idx_eval_min']).set_index('sample_id')
+        
+    return response_time_shift
