@@ -14,6 +14,7 @@ of a single participant. Run separately for each participant.
 import os
 import argparse
 import pandas as pd
+import numpy as np
 
 from rcid.identification import IDSessionManager, ReactionTimeIDSessionManager
 from rcid.utils import read_yaml
@@ -80,20 +81,32 @@ def collect_files(part, paths, first_step,
 def load_response_times_from_file(config, model, paths, file_dict):
     """ Load the precomputed response times.
     """
-    
-    rtdef = config['models'][model]['response_time_defintion']
-    rt_path = paths.getfilepath_reactiontimes(rtdef)
-    
-    df = pd.read_csv(rt_path, index_col = False)
+    rtdef = config['models'][model]['response_time_definition']
+    rtdef_set = {config['models'][m]['response_time_definition'] for m in config['models']}
+
+    rtdata = {d: pd.read_csv(paths.getfilepath_reactiontimes(d), index_col = False).set_index('sample_id') for d in rtdef_set}
     
     response_time_shift = []
+    eval_range = []
+
     for split in file_dict['splits']:
-        rt = df['response_time_s'][df['sample_id']==split].iloc[0]
-        shift = int(round(rt/T_S))
+
+        rt_values = []
+        for d in rtdef_set:
+            df = rtdata[d]
+            try:
+                rt = df.loc[split, 'response_time_s']
+            except KeyError:
+                raise ValueError(f"sample_id '{split}' not found in response time file '{d}'")
+            shift = int(round(rt/T_S))
+            rt_values.append(shift)
+
+            if d == rtdef:
+                response_time_shift.append(shift)
+
+        eval_range.append(np.max(rt_values))
         
-        response_time_shift.append(shift)
-        
-    return response_time_shift
+    return response_time_shift, eval_range
 
         
 def main():
@@ -127,8 +140,9 @@ def main():
             idmanager = ReactionTimeIDSessionManager(rt_samples, 
                                                      *id_args, **id_config)
         elif args.response_time_mode =='fixed':
-            command_time_shift = load_response_times_from_file(config, args.model, paths, file_dict)
+            command_time_shift, eval_range = load_response_times_from_file(config, args.model, paths, file_dict)
             id_config['command_time_shift'] = command_time_shift
+            id_config['eval_range'] = eval_range
             idmanager = IDSessionManager(*id_args, **id_config)
         elif args.response_time_mode == 'zero':
             idmanager = IDSessionManager(*id_args, **id_config)
