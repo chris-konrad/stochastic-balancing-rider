@@ -1,10 +1,6 @@
 """
 @author: Christoph M. Konrad
 """
-
-# Prevent memory leakage of KNN on Windows
-import os
-
 from rcid.utils import read_yaml, get_default_parser
 from rcid.path_manager import PathManager
 from rcid.pole_modelling import PoleModelTest, get_outliers_all_models

@@ -9,7 +9,6 @@ from rcid.pole_modelling import PoleModel
 from rcid.utils import read_yaml, get_default_parser
 from rcid.path_manager import PathManager
 
-import argparse
 import matplotlib.pyplot as plt
 import numpy as np
 import os

@@ -16,10 +16,8 @@ import matplotlib.pyplot as plt
 import time
 from matplotlib.patches import Polygon, FancyBboxPatch, Circle
 from shapely.plotting import plot_polygon
-from scipy.interpolate import make_splprep, splev
 
-from cyclistsocialforce.vehicle import BalancingRiderBicycle, PlanarPointBicycle, UncontrolledVehicle, calc_direct_approach_dest_force
-from cyclistsocialforce.intersection import SocialForceIntersection
+from cyclistsocialforce.vehicle import BalancingRiderBicycle, PlanarPointBicycle, calc_direct_approach_dest_force
 from cyclistsocialforce.scenario import Scenario
 from cyclistsocialforce.dynamics import BalancingRiderDynamics, PlanarPointDynamics
 from cyclistsocialforce.dynamics import from_gains, test_stability
@@ -32,8 +30,6 @@ from pytrafficutils.ssm import SurrogateSafetyMetricProcessor
 from pytrafficutils.footprints import DiamondFootprint
 
 from mypyutils.misc import none_switch
-
-from PIL import Image, ImageDraw
 
 from pypaperutils.design import TUDcolors
 tudcolors = TUDcolors()

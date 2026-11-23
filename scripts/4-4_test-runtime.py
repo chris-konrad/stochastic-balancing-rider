@@ -15,7 +15,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import pandas as pd
-import pickle as pkl
 from datetime import datetime
 
 from pypaperutils.design import TUDcolors

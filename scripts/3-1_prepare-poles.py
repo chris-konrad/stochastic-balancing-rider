@@ -5,7 +5,7 @@
 
 from rcid.utils import read_yaml, get_default_parser
 from rcid.path_manager import PathManager
-from rcid.pole_modelling import PoleSorter, PoleModel
+from rcid.pole_modelling import PoleSorter
 
 import matplotlib.pyplot as plt
 

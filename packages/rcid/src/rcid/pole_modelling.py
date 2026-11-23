@@ -29,7 +29,7 @@ from datetime import datetime
 
 from sklearn.mixture import GaussianMixture as SklearnGaussianMixture
 from sklearn.mixture._gaussian_mixture import _compute_precision_cholesky
-from sklearn.preprocessing import StandardScaler, PowerTransformer, FunctionTransformer
+from sklearn.preprocessing import StandardScaler, PowerTransformer
 from sklearn.model_selection import cross_validate
 from sklearn.linear_model import LinearRegression
 
@@ -38,7 +38,6 @@ from scipy.stats import multivariate_normal, gaussian_kde, ks_2samp
 from rcid.simulation import FixedInputZigZagTest, FixedSpeedStepResponses
 from rcid.simulation import FixedSpeedBalancingRiderBicycle, FixedSpeedPlanarPointBicycle
 from rcid.utils import read_yaml
-from rcid.path_manager import PathManager
 from rcid.data_processing import RCIDDataManager
 
 from pypaperutils.design import TUDcolors

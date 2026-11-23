@@ -9,7 +9,6 @@ Visualization helpers
 
 import numpy as np
 import matplotlib.pyplot as plt
-from pypaperutils.design import TUDcolors
 
 def plot_results(exp_data_dict=None,
                  test_sim = None,

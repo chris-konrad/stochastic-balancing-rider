@@ -8,7 +8,7 @@ import os
 
 from rcid.utils import read_yaml, get_default_parser
 from rcid.path_manager import PathManager
-from rcid.pole_modelling import PoleSorter, PoleModel, get_outliers_all_models
+from rcid.pole_modelling import PoleModel
 
 import matplotlib.pyplot as plt
 
