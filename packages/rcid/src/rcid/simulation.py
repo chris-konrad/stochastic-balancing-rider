@@ -13,8 +13,10 @@ application.
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle, Polygon, Circle
+import time
+from matplotlib.patches import Polygon, FancyBboxPatch, Circle
 from shapely.plotting import plot_polygon
+from scipy.interpolate import make_splprep, splev
 
 from cyclistsocialforce.vehicle import BalancingRiderBicycle, PlanarPointBicycle, UncontrolledVehicle, calc_direct_approach_dest_force
 from cyclistsocialforce.intersection import SocialForceIntersection
@@ -25,8 +27,9 @@ from cyclistsocialforce.utils import FIFOBuffer
 from cyclistsocialforce.parameters import BalancingRiderBicycleParameters
 from rcid.params.balanceassist_bikeparams import balanceassistv1_with_averagerider
 
-from pytrafficutils.agents import RectObstacle, Bicycle
+from pytrafficutils.agents import RectObstacle, Bicycle, StationaryAgent
 from pytrafficutils.ssm import SurrogateSafetyMetricProcessor
+from pytrafficutils.footprints import DiamondFootprint
 
 from mypyutils.misc import none_switch
 
@@ -298,6 +301,9 @@ class FixedSpeedStaticObstacleAvoidance(Scenario):
         'planarpoint': FixedResponseTimePlanarPointBicycle
     }
 
+    
+    PREVIEW_LENGTH = 3.0
+
     def __init__(self, bikemodel, speed, poles, id, response_time=0.0, **scenario_kwargs):
 
         self.speed = speed
@@ -312,6 +318,7 @@ class FixedSpeedStaticObstacleAvoidance(Scenario):
         bike_type = self.BIKEMODELS[bikemodel]
 
         # bike arguments
+        t_build_start = time.time()
         bike_params_args = dict(v_desired_default=speed, poles=poles)
         if bike_type is FixedSpeedBalancingRiderBicycle:
             s0 = self.INITIAL_CONDITION
@@ -329,6 +336,9 @@ class FixedSpeedStaticObstacleAvoidance(Scenario):
         self.bike = bike_type(s0, **bike_kwargs)
         self.bike.dest_force_func = calc_direct_approach_dest_force
         self.bike.setDestinations(self.destinations[:, 0], self.destinations[:, 1], reset=True)
+        self.t_build_bike = time.time() - t_build_start
+
+        #self.opponent
             
         #define interaction scenatio 
         self.t_s = self.bike.params.t_s
@@ -339,7 +349,6 @@ class FixedSpeedStaticObstacleAvoidance(Scenario):
         #response time queue
         
         self.response_time_queue = FIFOBuffer(self.bike.dest)
-        
 
     @classmethod
     def get_destinations(cls):
@@ -368,7 +377,7 @@ class FixedSpeedStaticObstacleAvoidance(Scenario):
         return obstacle
     
     @classmethod
-    def make_scenario_plot(cls, model, speed, radius=2, ax=None, draw_labels=True, footprint_kwargs={}):
+    def make_scenario_plot(cls, model, speed, ax=None, draw_labels=True, footprint_kwargs={}):
 
         default_footprint_kwargs = dict(add_points=False, edgecolor=None, facecolor=tudcolors.get('blauw'), ax=ax)
         footprint_kwargs = default_footprint_kwargs | footprint_kwargs
@@ -391,7 +400,7 @@ class FixedSpeedStaticObstacleAvoidance(Scenario):
         ax.scatter(destinations[:, 0], destinations[:, 1], color='lightgray', marker='x', zorder=3)
 
         for (x, y) in destinations:
-            circle = Circle((x, y), radius=radius, edgecolor='lightgray', facecolor='none', linestyle='--')
+            circle = Circle((x, y), radius=cls.PREVIEW_LENGTH, edgecolor='lightgray', facecolor='none', linestyle='--')
             ax.add_patch(circle)
 
         bicycle = Bicycle([0, 0.015, 0.01], cls.INITIAL_CONDITION[:4].reshape(1,4))
@@ -424,9 +433,16 @@ class FixedSpeedStaticObstacleAvoidance(Scenario):
         self.dist = np.zeros(N)
         
         try:
+            t_start = time.time()
             super().run(t)
+            exectution_time = time.time() - t_start
+            execution_rate = N / exectution_time
+
         except Collision as col:
             print(col)
+
+        return exectution_time, execution_rate
+
 
     def analyze_TTC(self, ax=None, ttc_marker_kwargs={}, footprint_kwargs={}):
 
@@ -483,6 +499,393 @@ class FixedSpeedStaticObstacleAvoidance(Scenario):
 
         return ax, p
 
+
+class LeeObstacleAvoidance(FixedSpeedStaticObstacleAvoidance):
+    """ Reparameterize the obstacle avoidance scenario to the setup of Lee et al. (2024).
+
+    Replicates the 12 km/h scenario of the obstacle avoidance experiment performed by Lee et al. (2024).
+    Uses parameters and results as outlined in their paper. 
+
+    References
+    ----------
+
+    Lee, O., Rasch, A., Schwab, A. L., & Dozza, M. (2020). Modelling cyclists’ comfort zones 
+    from obstacle avoidance manoeuvres. Accident Analysis & Prevention, 144, 105609. https://doi.org/distance
+    """
+
+    INITIAL_CONDITION = np.array([-20,0,0,0,0,0,0,0])   # The moving cyclist starts 20 m behind the stationary cyclist at (0,0)
+
+    DUMMY_WIDTH_LEE = 0.6
+    DUMMY_LENGTH_GUESS = 1.8
+
+
+    def __init__(self, bikemodel, speed, poles, id, response_time=0, **scenario_kwargs):
+        super().__init__(bikemodel, speed, poles, id, response_time, **scenario_kwargs)
+
+        self.bike.params.d_arrived_inter = self.PREVIEW_LENGTH
+
+    @classmethod
+    def get_obstacle(cls):
+        """The obstacle is a stationary dummy cyclist with the following parameters:
+
+            dummy cyclist position : (0,0)
+                Position of the rearmost point as indicated by the defition of the DTC (Section 2.4.3)
+            dummy cyclist width : 0.6 m 
+                See Section 3.2
+
+        We use a diamond footprint for the cyclist and guess its length. 
+        """
+        return np.array(DiamondFootprint(width=cls.DUMMY_LENGTH_GUESS, height=cls.DUMMY_WIDTH_LEE).get_polygons_at([0,0,0]).exterior.coords)[:-1,:]
+
+    @classmethod
+    def get_destinations(cls):
+        """ This defines the intermediate destinations such that the cyclist maneuver resemble the setup of Lee et al. (2020)
+        We place the destinations at
+            (1) event start (Figure 4)
+            (2) local maximum of the overtaking maneuver (Figure 4)
+            (3) event end (Figure 4)
+            (4) far distance from the obstacle (smooth return to original lane)
+
+        This usese the following parameters.
+            distance-to-collision (DTC) at 12 km/h 
+                The distance between the cyclists at the start of the steering maneuver  (Table 1)
+            amplitude of the overtaking model 
+                Parameter a of the gaussian model (Figure 7)
+            lateral offset of the overtaking model 
+                Parameter b of the gaussian model (Figure 7)
+            distance of the overtaking maneuver
+                Longitudinal distance between the start and the end of the overtaking maneuver (Table 3)
+            
+    
+        """
+        
+        dtc_lee = 7.5
+
+        a_lee = np.array([1.2, 1.5, 1.2, 1.1, 
+                          1.0, 1.2, 0.9, 0.9, 
+                          1.1, 1.3, 0.9, 1.1, 
+                          1.1, 1.0, 1.1, 1.0])
+        b_lee = np.array([-0.3, -0.2, -0.1, 0.0, 
+                          0.2, 0.3, 0.0, 0.2, 
+                          0.0, -0.1, 0.4, -0.1, 
+                          0.2, 0.1, -0.1, 0.1])
+
+        mu_lee = np.array([0.7, 1.9, 1.0, 1.5,
+                           1.1, -0.3, 0.2, -0.2,
+                           0.4, -1.5, -0.6, -0.7, 
+                           -1.2, 1.3, 0.6, 0.25])
+
+        distance_lee = 18.14
+
+        a_lee_mean = np.mean(a_lee)
+        b_lee_mean = np.mean(b_lee)
+
+        # the starting point in Lee is the point of the extremum of the countersteer bend.
+        # it is given via the dtc, which is measured from the front part of the cyclist to rear part of the obstacle.
+        countersteer_offset = 1.9
+        cyclist_front_length = np.max(Bicycle([0, 10*T_S, T_S], np.zeros((10,4)), width=cls.DUMMY_WIDTH_LEE).get_footprint_at(0).exterior.coords, axis=0)[0]
+        x_starting = - dtc_lee - (cls.DUMMY_LENGTH_GUESS/2) + cls.PREVIEW_LENGTH - countersteer_offset - cyclist_front_length
+
+        start_steering = [x_starting, b_lee_mean]
+        passing_point = [np.mean(mu_lee), a_lee_mean - b_lee_mean]  
+        return_point = [- dtc_lee + distance_lee, b_lee_mean]
+        end_experiment = [60, b_lee_mean]
+        
+        destinations = np.array(
+            [start_steering,
+             passing_point,
+             return_point,
+             end_experiment])
+
+        return destinations
+
+
+    def analyze_TTC(self, ax=None, ttc_marker_kwargs={}, footprint_kwargs={}):
+
+        #plotting configuration
+        default_footprint_kwargs = dict(add_points=False, ax=ax, edgecolor=None, facecolor=tudcolors.get('blauw'), alpha=0.1)
+        footprint_kwargs = default_footprint_kwargs | footprint_kwargs
+
+        default_ttc_marker_kwargs = dict(color=tudcolors.get('rood'), linestyle='none', marker=".", zorder=10000)
+        ttc_marker_kwargs = default_ttc_marker_kwargs | ttc_marker_kwargs
+
+        t = [0, self.i*T_S, T_S]
+
+        s_obstacle = [0,0,0]
+        fp = DiamondFootprint(width=self.DUMMY_LENGTH_GUESS, height=self.DUMMY_WIDTH_LEE)
+        obstacle = StationaryAgent(t, s_obstacle, fp, "stationary_cyclist")
+
+        bicycle = Bicycle(t, self.bike.traj[:4,:self.i].T, width=self.DUMMY_WIDTH_LEE)
+
+        ssm = SurrogateSafetyMetricProcessor([obstacle, bicycle], t_s=T_S, verbose=False)
+        ttc_results, _ = ssm.eval_TTC(T_extrapolation=5)
+
+        ttc = ttc_results['ttc_min'].iloc[0]
+        ttc_mean = ttc_results['ttc_mean'].iloc[0]
+        t_ttc_min = ttc_results['t_ttc_min'].iloc[0]
+
+        if not (ax is None):
+
+            x = ttc_results['x2_ttc_min'].iloc[0]
+            y = ttc_results['y2_ttc_min'].iloc[0]
+
+            if ttc == 0.0:
+                psi = ttc_results['psi2_ttc_min'].iloc[0]
+                s = np.array([[x, y, psi]])
+                plot_polygon(ssm.agents[1].footprint.get_polygons_at(s)[0], **footprint_kwargs)
+       
+            p_marker = ax.plot(x, y, **ttc_marker_kwargs)  
+
+        return ttc, t_ttc_min, ttc_mean, ax
+
+
+class StrongerLeeObstacleAvoidance(LeeObstacleAvoidance):
+    """An obstacle avoidance scenario similar to Lee et al. (2020), but with a larger obstacle requiring a 
+    wider evasive maneuver. 
+    """
+
+    OBSTACLE_PARAMS = dict(dist=20, width=1, depth=1)
+
+    @classmethod
+    def get_obstacle(cls):
+        """A larger obstacle compared to the cyclist in the Lee et al. (2020) scenario.
+        """
+
+        xmin = -cls.OBSTACLE_PARAMS['depth']/2
+        xmax = cls.OBSTACLE_PARAMS['depth']/2
+        ymin = -cls.OBSTACLE_PARAMS['width']
+        ymax = cls.OBSTACLE_PARAMS['width']
+
+        xy = np.array([[xmin, ymin],
+                    [xmax, ymin],
+                    [xmax, ymax], 
+                    [xmin, ymax]])
+
+        return xy
+
+    @classmethod
+    def get_destinations(cls):
+        """The larger obstacle requires a wider evasive maneuver
+        """
+
+        dest = LeeObstacleAvoidance.get_destinations()
+
+        dest[1,1] += 1.2
+        dest[2,0] += 5
+
+        return dest
+
+
+    def analyze_TTC(self, ax=None, ttc_marker_kwargs={}, footprint_kwargs={}):
+
+        ttc, t_ttc_min, ttc_mean, ax = FixedSpeedStaticObstacleAvoidance.analyze_TTC(self, ax=ax, ttc_marker_kwargs=ttc_marker_kwargs, footprint_kwargs=footprint_kwargs)
+
+        return ttc, t_ttc_min, ttc_mean, ax
+
+    
+class FixedSpeedLeftTurn(FixedSpeedStaticObstacleAvoidance):
+    """
+    """
+
+    dist_opponent = 26
+    path_width = 4
+    latpos_on_path = 1
+    length_approach = 5
+    length_exit = 10
+    turn_radius = 5
+    path_length_horz = 30
+    path_length_vert = 20
+    kerb_radius = 1.0
+    v_opponent = 11/3.6
+
+    def __init__(self, bikemodel, speed, poles, id, response_time=0, **scenario_kwargs):
+        super().__init__(bikemodel, speed, poles, id, response_time, **scenario_kwargs)
+
+        self.bike.params.d_arrived_inter = 5.0
+
+    @classmethod
+    def get_opponent_traj(cls, t_max):
+        p0 = cls.INITIAL_CONDITION[:2]
+
+        v = cls.v_opponent
+        x0 = p0[0] + cls.dist_opponent
+        y0 = p0[0] + cls.path_width / 2
+
+        n_steps = int(round(t_max/T_S))
+        dx = T_S * v
+        x = x0 - dx*np.arange(n_steps)
+        y = y0 * np.ones_like(x)
+        psi = - np.pi * np.ones_like(x)
+        v = v * np.ones_like(x)
+
+        t =T_S*np.arange(n_steps)
+
+        return t, np.array([x, y, psi, v]).T
+
+    @classmethod
+    def get_destinations(cls):
+
+        p0 = cls.INITIAL_CONDITION[:2]
+        ds = .5
+
+        arc_length = 2*np.pi*cls.turn_radius / 4
+        n_steps_arc = int(np.floor(arc_length/ds))
+        arc_segments = np.pi/2 - np.linspace(0, np.pi/2, n_steps_arc+1)
+        
+        x1 = [cls.length_approach]
+        y1 = [0]
+
+        x2 = cls.turn_radius * np.cos(arc_segments[:-1]) + cls.length_approach
+        y2 = cls.turn_radius * np.sin(arc_segments[:-1]) - cls.turn_radius
+
+        y3 = - cls.turn_radius - np.arange(0, cls.path_length_vert, ds) 
+        x3 = (cls.length_approach + cls.turn_radius) * np.ones_like(y3) 
+
+        x = np.concatenate((x1, x2, x3))
+        y = - np.concatenate((y1, y2, y3))
+
+        destinations = np.array([x, y]).T + p0[np.newaxis,:]
+        
+        return destinations
+
+    @classmethod
+    def make_scenario_plot(cls, model, speed, radius=2, ax=None, draw_labels=True, footprint_kwargs={}):
+
+        p0 = cls.INITIAL_CONDITION[:2]
+
+        default_footprint_kwargs = dict(add_points=False, edgecolor='black', ax=ax)
+        footprint_kwargs = default_footprint_kwargs | footprint_kwargs
+
+        color_ego = tudcolors.get('blauw')
+        color_opp = tudcolors.get('rood')
+        
+        if ax is None:
+            fig, ax = plt.subplots(1,1, layout='constrained')
+            fig.set_size_inches(17,9)
+
+        ax.set_aspect("equal")
+        if draw_labels:
+            ax.set_ylabel("y [m]")
+            ax.set_xlabel("x [m]")
+            ax.set_title(f"Left turn test for model {model}, v = {speed*3.6:.1f} km/h")
+
+        destinations = cls.get_destinations()
+        destinations = np.concat([p0[np.newaxis, :], destinations], axis=0)
+        t, opponent_path = cls.get_opponent_traj(10)
+
+        def _getkeypoints_path_horz(x0, y0, length):
+            path = np.array([[0, length, length, 0], 
+                             [cls.path_width/2, cls.path_width/2, -cls.path_width/2, -cls.path_width/2]]).T
+            path = path + np.array([[x0, y0]])
+            return path
+
+        def _getkeypoints_path_vert(x0, y0, length):
+            path = np.array([[-cls.path_width/2, cls.path_width/2, cls.path_width/2, -cls.path_width/2], 
+                             [0, 0, length, length]]).T
+            path = path + np.array([[x0, y0]])
+            return path
+        
+        points_pathA = _getkeypoints_path_horz(p0[0], p0[1]+cls.latpos_on_path, 20)
+        points_pathB = _getkeypoints_path_vert(cls.turn_radius+cls.length_approach-cls.latpos_on_path,
+                                               p0[1]+cls.latpos_on_path+cls.path_width/2, 20)
+
+        # area corners
+        pad = 5
+        xmax = p0[0] + cls.path_length_horz + pad
+        xmin = p0[0] - pad
+        ymin = p0[1] - cls.path_width/2 + cls.latpos_on_path - pad
+        ymax = p0[1] + cls.path_width/2 + cls.latpos_on_path + cls.path_length_vert + pad
+
+        # intersection corners
+        xmin_inter = p0[0] + cls.length_approach + cls.turn_radius - cls.path_width/2 - cls.latpos_on_path
+        xmax_inter = p0[0] + cls.length_approach + cls.turn_radius + cls.path_width/2 - cls.latpos_on_path
+        ymax_inter = p0[1] + cls.path_width/2 + cls.latpos_on_path
+        ymin_inter = p0[1] - cls.path_width/2 + cls.latpos_on_path
+
+        points_path = [[xmin, ymax], [xmax, ymax], [xmax, ymin], [xmin, ymin]]
+        points_kerbL = [[xmin, ymax], [xmin_inter, ymax], [xmin_inter, ymax_inter], [xmin, ymax_inter]]
+        points_kerbR = [[xmax_inter, ymax], [xmax, ymax], [xmax, ymax_inter], [xmax_inter, ymax_inter]]
+        points_kerbB = [[xmin, ymin_inter], [xmax, ymin_inter], [xmax, ymin], [xmin, ymin]]
+
+        markingL = [[xmin, xmin_inter-cls.kerb_radius], [p0[1]+cls.latpos_on_path, p0[1]+cls.latpos_on_path]]  
+        markingR = [[xmax_inter+cls.kerb_radius, xmax], [p0[1]+cls.latpos_on_path, p0[1]+cls.latpos_on_path]]
+        markingV = [[xmin_inter+cls.path_width/2, xmin_inter+cls.path_width/2,], [ymax_inter+cls.kerb_radius, ymax]]
+
+        def _poly2rect(points):
+            xy = points[-1]
+            width = points[1][0] - points[0][0]
+            height = points[1][1] - points[2][1]
+            return xy, width, height
+
+        for pnts in [points_path]:
+            poly = Polygon(pnts, closed=True, facecolor='#ffcccc', edgecolor='none', zorder=0)
+            ax.add_patch(poly)
+        for pnts in [points_kerbL, points_kerbR, points_kerbB]:
+            poly = FancyBboxPatch(*_poly2rect(pnts), boxstyle=f"round,pad=0.0,rounding_size={cls.kerb_radius:.2f}", facecolor='#ccccb3', edgecolor='black', zorder=1)
+            ax.add_patch(poly)
+        for pnts in [markingL, markingR, markingV]:
+            line = ax.plot(pnts[0], pnts[1], color="white", linestyle="dashed", linewidth=2)
+
+        #ax.plot(destinations[:, 0], destinations[:, 1], color='black', linewidth=3, zorder=4)
+        ax.plot(destinations[:, 0], destinations[:, 1], color='gray', linewidth=1, zorder=5, linestyle='dashed', label='turn guideline')
+        #bicycle = Bicycle([0, 0.015, 0.01], cls.INITIAL_CONDITION[:4].reshape(1,4))
+        #plot_polygon(bicycle.footprint.get_polygons_at(cls.INITIAL_CONDITION[:3].reshape(1,3))[0], facecolor=color_ego, **footprint_kwargs)
+
+        #bicycle = Bicycle([0, 0.015, 0.01], opponent_path[0,:].reshape(1,4))
+        #plot_polygon(bicycle.footprint.get_polygons_at(opponent_path[0,:3].reshape(1,3))[0], facecolor=color_opp, **footprint_kwargs)
+        #ax.plot(opponent_path[:, 0], opponent_path[:, 1], color='black', linewidth=3, zorder=3)
+        ax.plot(opponent_path[:, 0], opponent_path[:, 1], color=color_opp, linewidth=1, zorder=5, linestyle='dashed', label='opponent trajectory')
+
+        ax.set_ylim(-2, 12)
+        ax.set_xlim(0, 25)
+
+        bicycle = Bicycle([0, 0.015, 0.01], cls.INITIAL_CONDITION[:4].reshape(1,4))
+        plot_polygon(bicycle.footprint.get_polygons_at(cls.INITIAL_CONDITION[:3].reshape(1,3))[0], **footprint_kwargs)
+
+        return ax
+
+    def analyze_safety_measures(self, ax=None, ttc_marker_kwargs={}, footprint_kwargs={}):
+
+        #plotting configuration
+        default_footprint_kwargs = dict(add_points=False, ax=ax, edgecolor=None, facecolor=tudcolors.get('blauw'), alpha=0.1)
+        footprint_kwargs = default_footprint_kwargs | footprint_kwargs
+
+        default_ttc_marker_kwargs = dict(color=tudcolors.get('rood'), linestyle='none', marker=".", zorder=10000, label='TTC conflict locations')
+        ttc_marker_kwargs = default_ttc_marker_kwargs | ttc_marker_kwargs
+
+        t = [0, self.i*T_S, T_S]
+
+        p0 = self.INITIAL_CONDITION[:2]
+        s_obstacle = [p0[0]+self.OBSTACLE_PARAMS['dist'], p0[1], 0]
+
+        t_opp, path_opp = FixedSpeedLeftTurn.get_opponent_traj(self.i*T_S)
+        
+        bicycle = Bicycle(t, self.bike.traj[:4,:self.i].T)
+        opponent = Bicycle(t, path_opp)
+
+        ssm = SurrogateSafetyMetricProcessor([opponent, bicycle], t_s=T_S, verbose=False)
+        ttc_results, _ = ssm.eval_TTC(T_extrapolation=5)
+        pet_results, conflict_area = ssm.eval_PET(ignore_edgecases=True)
+
+        ttc = ttc_results['ttc_min'].iloc[0]
+        ttc_mean = ttc_results['ttc_mean'].iloc[0]
+        t_ttc_min = ttc_results['t_ttc_min'].iloc[0]
+        pet = pet_results['pet_s'].iloc[0]
+        dmin = pet_results['dmin_m'].iloc[0]
+
+        if not (ax is None):
+
+            x = ttc_results['x2_ttc_min'].iloc[0]
+            y = ttc_results['y2_ttc_min'].iloc[0]
+
+            if ttc == 0.0:
+                psi = ttc_results['psi2_ttc_min'].iloc[0]
+                s = np.array([[x, y, psi]])
+                plot_polygon(ssm.agents[1].footprint.get_polygons_at(s)[0], **footprint_kwargs)
+       
+            p_marker = ax.plot(x, y, **ttc_marker_kwargs)  
+
+        return ttc, t_ttc_min, ttc_mean, pet, dmin, conflict_area, ax, p_marker
 
 class FixedInputZigZagTest(Scenario):
     """
@@ -617,10 +1020,15 @@ class FixedInputZigZagTest(Scenario):
         of the provided command sequence and the sampling time.
         """
         t_end = self.t_s * (len(self.p_x_c))
+        t_start = time.time()
         Scenario.run(self, t_end)
+        exectution_time = time.time() - t_start
+        execution_rate = len(self.p_x_c) / exectution_time
 
         if self.animate:
             self.bike.drawing.set_animated(False)
+
+        return exectution_time, execution_rate
 
     def create_axes(self):
         """
@@ -886,7 +1294,12 @@ class FixedSpeedStepResponses():
             poles_i = self.poles[i,:]
 
             if np.any(np.real(poles_i)>0):
-                print(f"Skipping ustable prediction {i}")
+                print(f"Skipping ustable prediction {i}.")
+                trajs.append(None)
+                continue
+            if np.any(~np.isfinite(poles_i)):
+                print(f"Skipping empty row {i}.")
+                trajs.append(None)
                 continue
 
             print(f"Simulating pole {i}/{n_samples}")
