@@ -139,13 +139,17 @@ class PathManager:
     @verify_path
     def getdir_id_participant(self, model, part):
         dir_id = self.getdir_id(model)
+        part_label = f"_{part}_"
         for d in os.listdir(dir_id):
-            if part in d:
+            if part_label in d:
                 return os.path.join(dir_id, d)
 
     @verify_path
-    def getdir_id_evaluation(self, model):
-        return os.path.join(self.id_result_dir, model, 'evaluation')
+    def getdir_id_evaluation(self, model, rev=None):
+        name = 'evaluation'
+        if rev is not None:
+            name += f"_rev-{rev}"
+        return os.path.join(self.id_result_dir, model, name)
     
     @verify_path
     def getdir_id_aggregation(self, model):
@@ -158,16 +162,21 @@ class PathManager:
         return os.path.join(dir, 'stats')
 
     @verify_path
-    def getfilepath_bestidresult(self, model, variant=None):
-        dir = self.getdir_id_aggregation(model)
-        if not variant is None:
-            dir = os.path.join(dir, variant)
-        for f in os.listdir(dir):
-            pattern = r"(.*)_(.*)_best-gains.csv"
-            r = re.findall(pattern,f)
-            if r:
-                return os.path.join(dir, f)
-        raise FileNotFoundError(f"Can't find any '{variant}' model in '{dir}'!s")
+    def getfilepath_id_solution(self, model, part, step, guess):
+        dir_id = self.getdir_id_participant(model, part)
+        dir_sol = os.path.join(dir_id, "solutions")
+        return os.path.join(dir_sol, f"sol_{step}-{guess}.pkl")
+
+    @verify_path
+    def getfilepath_id_identifiability(self, model):
+        dir_id = self.getdir_id_evaluation(model)
+        return os.path.join(dir_id, f'{model}_parameter-identifiability.csv')
+
+    @verify_path
+    def getfilepath_bestidresult(self, model):
+        dir = self.getdir_id_evaluation(model)
+        fname = f"{model}_identification-results.csv"
+        return os.path.join(dir, fname)
     
     @verify_path
     def getfilepath_id_aggregation_stats(self, model, category):
@@ -177,6 +186,20 @@ class PathManager:
     @verify_path
     def getdir_pm_testobstacle(self, riderbike_model_id, pole_model_id=None):
         dir = os.path.join(self.id_result_dir, riderbike_model_id, 'pole-modeling', 'test-obstacle-avoidance')
+        if pole_model_id is not None:
+            dir = os.path.join(dir, pole_model_id)
+        return dir
+
+    @verify_path
+    def getdir_pm_testobstaclelee(self, riderbike_model_id, pole_model_id=None):
+        dir = os.path.join(self.id_result_dir, riderbike_model_id, 'pole-modeling', 'test-obstacle-avoidance-lee')
+        if pole_model_id is not None:
+            dir = os.path.join(dir, pole_model_id)
+        return dir
+
+    @verify_path
+    def getdir_pm_testturning(self, riderbike_model_id, pole_model_id=None):
+        dir = os.path.join(self.id_result_dir, riderbike_model_id, 'pole-modeling', 'test-turning')
         if pole_model_id is not None:
             dir = os.path.join(dir, pole_model_id)
         return dir
@@ -207,6 +230,18 @@ class PathManager:
             if len(r) > 0:
                 tag = r[0]
                 filename = f"{model}_{tag}_test-obstacle-avoidance_results.csv"
+                return os.path.join(dir, filename)
+        raise FileNotFoundError(f"Can't find any '{variant}' result_table in '{dir}'!s")
+
+    @verify_path
+    def getfilepath_pm_testobstaclelee_resulttable(self, model, variant):
+        dir = self.getdir_pm_testobstaclelee(model)
+        for f in os.listdir(dir):
+            pattern = rf"{variant}"
+            r = np.array(re.findall(pattern, f)).flatten()
+            if len(r) > 0:
+                tag = r[0]
+                filename = f"{model}_{tag}_test-obstacle-avoidance-lee_results.csv"
                 return os.path.join(dir, filename)
         raise FileNotFoundError(f"Can't find any '{variant}' result_table in '{dir}'!s")
     
@@ -245,6 +280,19 @@ class PathManager:
             if len(r) > 0:
                 tag = r[0]
                 filename = f"{model}_{tag}_test-obstacle-avoidance_trajectories.pkl"
+                return os.path.join(dir, filename)
+        raise FileNotFoundError(f"Can't find any '{variant}' result_table in '{dir}'!s")
+
+
+    @verify_path
+    def getfilepath_pm_testobstaclelee_trajectorydata(self, model, variant):
+        dir = self.getdir_pm_testobstaclelee(model)
+        for f in os.listdir(dir):
+            pattern = rf"{variant}"
+            r = np.array(re.findall(pattern, f)).flatten()
+            if len(r) > 0:
+                tag = r[0]
+                filename = f"{model}_{tag}_test-obstacle-avoidance-lee_trajectories.pkl"
                 return os.path.join(dir, filename)
         raise FileNotFoundError(f"Can't find any '{variant}' result_table in '{dir}'!s")
     
