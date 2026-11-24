@@ -1,10 +1,6 @@
 """
 @author: Christoph M. Konrad
 """
-
-# Prevent memory leakage of KNN on Windows
-import os
-
 from rcid.utils import read_yaml, get_default_parser
 from rcid.path_manager import PathManager
 from rcid.pole_modelling import PoleModelTest, get_outliers_all_models
@@ -25,8 +21,8 @@ def main():
 
     path_manager = PathManager(config['dir_data'], config['dir_results'])
 
-    outlier_table = get_outliers_all_models(path_manager, config['processing'][script_key]['models_for_comparison'])
-    outliers = outlier_table[outlier_table['outliers']]['sample_id'].to_list()
+    outlier_table = get_outliers_all_models(path_manager, config['processing'][script_key]['models'])
+    outliers = outlier_table[outlier_table['outliers_all']]['sample_id'].to_list()
 
     val = PoleModelTest(path_manager,  args.model, args.polemodel, 
                         save=args.save, 
@@ -35,7 +31,11 @@ def main():
                         outliers=outliers)
     
     val.run(config['processing'][script_key]['n_predictions'])
-    plt.show(block=True)
+
+    if args.interactive:
+        plt.show(block=True)
+    else:
+        plt.close("all")
 
 if __name__ == "__main__":
     main()

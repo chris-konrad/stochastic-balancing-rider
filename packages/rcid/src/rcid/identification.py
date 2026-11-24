@@ -14,6 +14,7 @@ import pickle
 import pandas as pd
 import permetrics as pm
 from time import strftime, time
+from scipy.linalg import null_space
 
 #helpers
 from mypyutils.log import logger
@@ -86,7 +87,8 @@ class ControlIdentifier:
                n_reps=1,
                add_stability_penalty = False,
                sim_duration = 15,
-               pen_duration = 5,):
+               pen_duration = 5,
+               eval_range = None,):
         """ Create a control identifier object
 
         Parameters
@@ -132,6 +134,9 @@ class ControlIdentifier:
         pen_duration : float
             Duration in s at the end of the total duration for which the stability 
             penalty is applied. 
+        eval_range : list, optional
+            The range of indices [i_first, i_last[ to include in the evaluation. If None, 
+            all indices are included. Default is None. 
         """
 
         # ------ Setup --------------------------------------------------------        
@@ -143,10 +148,12 @@ class ControlIdentifier:
         self.N_data = len(data_dict["p_x_c"])-1
 
         self.solution = None
+        self.initial_guess = None
             
         self.id = id
         self.known_gain_map = known_gain_map
         self.n_known_params = len(known_gain_map)
+        self.eval_range = eval_range
         
         # ------ EOM Repetitions ------------------------------------------
         if not (0 < n_reps <= 10):
@@ -187,10 +194,8 @@ class ControlIdentifier:
         self._transform_input_data('N')
     
         # ------ Constraints --------------------------------------------------
-        self.constraints = (
-            self.states[self.pos_state_ids[0]](0) - self.data_dict['p_x'][0],  # initial x location
-            self.states[self.pos_state_ids[1]](0) - self.data_dict['p_y'][0],  # initial y location
-            self.states[self.psi_state_id[0]](0) - self.data_dict['psi'][0])   # initial orientation
+        # use first measurements as initial condition
+        self.constraints = [s(0)-self.data_dict[s.name[:-1]][0] for s in self.states]  
     
         # ------ Bounds -------------------------------------------------------
         self._make_bounds(gain_bounds, slack_state_bounds)
@@ -244,7 +249,7 @@ class ControlIdentifier:
             
         if self.bike_class is FixedSpeedBalancingRiderBicycle:
             
-            mirrored_states = ['psi', 'dpsi', 'delta', 'ddelta',
+            mirrored_states = ['psi', 'psidot', 'delta', 'deltadot',
                                'p_y', 'p_y_c', 'psi_c']
             
             for k in mirrored_states:  
@@ -476,12 +481,14 @@ class ControlIdentifier:
         self.Ku_param_ids = np.array([4])
         
         # ------ Error scaling and objective features -------------------------
-        self.names_objective_states = ['delta', 'phi', 'psi']
+        self.names_objective_states = ['delta', 'phi', 'deltadot', 'phidot', 'psi']
         
         self.err_scales = {}
         self.err_scales['delta'] = self.N_data * np.pi/(self.error_weight*180)
         self.err_scales['phi'] = self.N_data * np.pi/(self.error_weight*180)
         self.err_scales['psi'] = self.N_data * np.pi/(self.error_weight*180)
+        self.err_scales['phidot'] = 2 * self.N_data * np.pi/(self.error_weight*180)
+        self.err_scales['deltadot'] = 2 * self.N_data * np.pi/(self.error_weight*180)
         self.err_scales['phi_reg'] = 0.5 * self.err_scales['phi'] / self.N_data * (self.N_reg)
         
     def _setup_planarpoint(self):
@@ -638,10 +645,283 @@ class ControlIdentifier:
             
         # substitute known gains
         known_gain_map = {}
-        for k in self.known_gain_map:
-            known_gain_map[self.params[self.param_names.index(k)]] = self.known_gain_map[k]
+        for k, v in self.known_gain_map.items():
+            ksym = self.params[self.param_names.index(k)]
+            if isinstance(v, str):
+                known_gain_map[ksym] = self._parse_known_gain(v)
+            else:
+                known_gain_map[ksym] = self.known_gain_map[k]
         self.known_gain_map = known_gain_map
         self.f = self.f.subs(known_gain_map)
+
+    def _parse_known_gain(self, textdef):
+        """Convert a string like 'A * k_gain' to a symbolic expression.
+        """
+        parts = textdef.split(" ")
+
+        if len(parts) != 3:
+            raise ValueError("Can only parse gain definitions looking like A * k_gain.")
+        if parts[1] != "*":
+            raise ValueError("Can only parse multiplications!")
+        operand1 = parts[0]
+        operand2 = parts[2]
+
+        multiplicant = None
+        gain = None 
+        for op in [operand1, operand2]:
+            try: 
+                multiplicant = float(op)
+            except ValueError:
+                if op in self.param_names:
+                    gain = self.params[self.param_names.index(op)]
+                else:
+                    raise ValueError(f"'{op}' is neither a float not a gain parameter!")
+
+        assert multiplicant is not None
+        assert gain is not None
+
+        return multiplicant * gain
+
+
+    def _form_sensitivity_dynamics(self, fix_gains=[], fix_x0=[]):
+        """Form the sensitivity dynamics of the states w.r.t to the unknown parameters.
+
+        Vdot = df/dx * V + df/dTheta
+        """
+        fix_x0 = ['p_x0', 'p_y0', 'psi0'] + fix_x0
+
+        states_t = sm.Matrix([[x(self.t)] for x in self.states])
+        states_t_diff = states_t.diff(self.t)
+        states_0 = sm.Matrix([[x(0)] for x in self.states if x.name not in fix_x0])
+        params = sm.Matrix([[p] for p in self.params if p not in self.known_gain_map and p.name[:-1] not in fix_gains])
+
+        if len(states_0):
+            unknowns = params.col_join(states_0)
+        else:
+            unknowns = params
+        self.n_unknowns = unknowns.shape[0]
+        self.names_unknowns = [p.name[:-1] for p in params] + [f"{s.name[:-1]}(0)" for s in states_0]
+
+
+        f = -(self.f-states_t_diff)     #self.f is implict: 0 = - f(x) + xdot -> rearrange before taking jacobians.  
+        A_V = f.jacobian(states_t)
+        B_V = f.jacobian(unknowns)
+
+        return A_V, B_V
+
+
+    def _integrate_sensitivity_dynamics(self, fix_gains=[], fix_x0=[], measurements=[]):
+
+        if self.integration_method != 'midpoint':
+            raise NotImplementedError(f"Integrating sensitivity dynamics using {self.integration_method} is not implemented. The only available method is 'midpoint'.")
+
+        # get the optimized solution
+        states = [s(self.t) for s in self.states]
+        state_vals, _, gain_vals = parse_free(self.solution, self.n_states*self.n_reps, 0, self.N)
+        states_midpoint = (state_vals[:,1:] + state_vals[:,:-1])/2
+
+        inputs = list(self.known_trajectory_map.keys())
+        inputs_midpoint = np.array([(self.known_trajectory_map[inp][1:] + self.known_trajectory_map[inp][:-1])/2 for inp in inputs])
+
+        params = self.prob.collocator.unknown_parameters
+
+        Asens, Bsens = self._form_sensitivity_dynamics(fix_gains=fix_gains, fix_x0=fix_x0)
+
+        eval_Asens = sm.lambdify((states, inputs, params), Asens)
+        eval_Bsens = sm.lambdify((states, inputs, params), Bsens)
+
+        h = T_S
+        I = I = np.eye(self.n_states)
+
+        def _integrate(V, x_mp, u_mp, p):
+            
+            A_mp = eval_Asens(x_mp, u_mp, p)
+            B_mp = eval_Bsens(x_mp, u_mp, p)
+
+            fac1 = I + h/2 * A_mp
+            fac2 = I - h/2 * A_mp
+            
+            #Phi = np.linalg.solve(fac2, fac1)
+            #ev = np.linalg.eigvals(Phi)
+            #evA = np.linalg.eigvals(A_mp[:5,:5])
+
+            #print(
+            #    f"max Re(A)={np.max(np.real(evA)): .3e}, "
+            #    f"max |Phi|={np.max(np.abs(ev)): .3e}, "
+            #    f"x_mp = {[round(float(x),3) for x in x_mp]}, ",
+            #    f"u_mp = {[round(float(x),3) for x in u_mp]}, ",
+            #    f"p = {[round(float(x),3) for x in p]}, ",
+            #)
+            
+
+            #print(f"{np.max(np.abs(ev))}, {np.max(np.real(ev))}, {np.linalg.norm(B_mp)}, ", end="")
+            return np.linalg.solve(fac2, fac1 @ V) + h * np.linalg.solve(fac2, B_mp)
+
+        #self.names_objective_states = self.state_names
+
+        # prepare matrices. The inital value for V is all zeros for gain parameter sensitivities and 1 for initial state sensitivities.
+        V_k = np.zeros((self.n_states, self.n_unknowns))
+        for i, s in enumerate(self.state_names):
+            s0 = s+"(0)"
+            if s0 in self.names_unknowns:
+                j = self.names_unknowns.index(s0)
+                V_k[i,j] = 1
+
+        if len(measurements) == 0:
+            measurements = self.names_objective_states
+        n_objective_states = len(measurements)
+        S = np.zeros((self.N, n_objective_states, self.n_unknowns))
+        C = np.zeros((n_objective_states, self.n_states))
+        for i, name in enumerate(measurements):
+            if name not in self.state_names:
+                raise ValueError(f"Unknown state name in measurements: '{name}'. The state names are {self.state_names}.")
+            C[i, self.state_names.index(name)] = 1
+
+        # run the integration loop and pick objective states
+        S[0,:,:] = C @ V_k 
+        for k in range(self.N-1):
+            V_k = _integrate(V_k, states_midpoint[:, k], inputs_midpoint[:, k], gain_vals) 
+            S[k+1, :, :] = C @ V_k
+            #print(np.linalg.norm(V_k))
+
+        return S
+
+    def _calc_fisher_information(self, fix_gains=[], fix_x0=[], measurements=[], include_x0=True, verbose=True, plot=False):
+
+        # Sensitivity S of the objective states at the solution
+        S = self._integrate_sensitivity_dynamics(fix_gains=fix_gains, fix_x0=fix_x0, measurements=measurements)
+
+        if not include_x0:
+            names_unknowns = [n for n in self.names_unknowns if "(0)" not in n]
+            idx = [self.names_unknowns.index(n) for n in names_unknowns]
+
+            self.names_unknowns = names_unknowns
+            self.n_unknowns = len(names_unknowns)
+
+            S = S[:,:, idx]
+
+        S_stack = S.reshape(-1, self.n_unknowns)
+        U, sigma, VT = np.linalg.svd(S_stack, full_matrices=False)
+        
+        evmin = VT[-1]
+
+        kap = (np.max(sigma) / np.min(sigma))**2
+        lams = sigma**2
+
+        # Calc parameter stds
+        #std_unknowns = np.sqrt(np.diag(np.linalg.inv(FIM)))
+
+        if verbose:
+            head = f"Identifiability Analysis: {self.id}"
+            print(head + "\n" + "-"*len(head))
+
+            print(f"    FIM condition: {kap:.2e}")
+
+            print("    FIM eigenvals:  ", end="")
+            for l in lams:
+                print(f"{l:.2e}  ", end="")
+            print("")
+
+            print("    FIM eignvecs:        ", end="")
+            for n in self.names_unknowns:
+                print(f" {n[:8]:>8},", end="")
+            print("")
+            for i in range(1, min(len(VT)+1,3)):
+                vm = VT[-i]
+                print(f"        {i}th smallest EV: [", end="")
+                for j, v in enumerate(vm):
+                    val = f"{v:>8.3f}"
+                    if j+1 == vm.size:
+                        suffix = "]\n"
+                    else:
+                        suffix = ", "
+                    print(val, end=suffix) 
+            print("")
+
+        # make table row
+        row = dict(sample_id=self.id, condition_num=kap)
+        for i, ev in enumerate(VT):
+            row[f'lamda_{i}'] = lams[i]
+            for j in range(self.n_unknowns):
+                row[f'ev_{i}_{self.names_unknowns[j].replace("_", "")}'] = ev[j]
+
+        #plot 
+        if plot:
+            if len(measurements) == 0:
+                measurements = self.names_objective_states
+            fig, axes = plt.subplots(len(measurements), 1, sharex=True, sharey=True)
+            t = np.arange(S.shape[0]) * T_S
+            sol = self.get_solution_dict()
+            for i, ax in enumerate(axes):
+                yi = sol['solution']['states'][measurements[i]]
+                ax.set_title(measurements[i])
+                ax.set_ylabel("dy/dparam")
+                for j in range(S.shape[2]):
+                    sij = S[:,i,j]
+                    sij_norm = sij / yi
+                    ax.plot(t, S[:,i,j], label=self.names_unknowns[j])
+
+            ax.set_xlabel("time [s]")
+            ax.legend()
+            fig.suptitle("Relative change per output for each unit change per parameter.")
+            plt.show(block=True)
+
+        return row
+
+    def load_solution(self, filepath):
+
+        if self.n_reps > 1:
+            raise NotImplementedError("Loading solution dicts for eom repetitions > 1 is not implemented!")
+
+        with open(filepath, 'rb') as f:
+            solution_dict = pickle.load(f)
+
+        # verify that the solution matches the initialization of this ControlIdentifier
+        def _test_sol(target, key):
+            if target != solution_dict[key]:
+                raise ValueError((f"Value missmatch between the solution {filepath} and this ControlIdentifier Instance! "
+                                  f"{key} should be {target} but the solution contains solution_dict[{key}]={solution_dict[key]}"))
+
+        _test_sol(self.n_states, "n_states")
+        _test_sol(self.N, "n_sim")
+        _test_sol(self.N_data, "n_data")
+        _test_sol(self.N_reg, "n_pen")
+        _test_sol(T_S, "t_s")
+
+        # unpack solution
+        def _unpack(cat, free):
+            for sname, vals in solution_dict[cat]['states'].items():
+                ssym = self.states[self.get_opty_state_ids(sname)](self.t)
+                self.prob.fill_free(free, vals, ssym)
+            for gname, val in solution_dict[cat]['gains'].items():
+                gsym = self.params[self.param_names.index(gname)]
+                if gsym in self.known_gain_map:
+                    continue
+                self.prob.fill_free(free, val, gsym)
+
+        if self.initial_guess is None:
+            self.initial_guess = np.zeros(self.N * self.n_states * self.n_reps + (self.n_params - self.n_known_params))
+        self._initial_guess_frame = "E"
+        _unpack("initial_guess", self.initial_guess)
+
+        if self.solution is None:
+            self.solution = np.zeros(self.N * self.n_states * self.n_reps + (self.n_params - self.n_known_params))
+        self._solution_frame = "E"
+        _unpack("solution", self.solution)
+            
+
+    def run_identifiability_analysis(self, fix_gains=[], fix_x0=[], measurements=[], include_x0=True, verbose=False, plot=False):
+
+        self._transform_input_data("N")
+        self._transform_solution("N")
+        self._transform_initial_guess("N")
+
+        if self.solution is None:
+            raise RuntimeError("No solution for identifiability analysis! First find a solution using fit() or load a solution from file .from_solution_file()")
+
+        row = self._calc_fisher_information(fix_gains=fix_gains, fix_x0=fix_x0, measurements=measurements, include_x0=include_x0, verbose=verbose, plot=plot)
+
+        return row
         
         
     def _make_eoms_set_balancingrider(self, p_x_c, p_y_c, v, i):
@@ -780,8 +1060,12 @@ class ControlIdentifier:
             i+=1
             
         if add_known:
+            gain_dict_sym = {p: gain_dict[p.name[:-1]] for p in self.params if p.name[:-1] in gain_dict}
             for symbol, value in self.known_gain_map.items():
                 gain_dict[symbol.name[:-1]] = value
+            for name, value in gain_dict.items():
+                if not isinstance(value, float):
+                    gain_dict[name] = gain_dict[name].subs(gain_dict_sym)
         return gain_dict
     
     def _get_state_from_csf_traj(self, state_name, traj):
@@ -831,6 +1115,7 @@ class ControlIdentifier:
         """
         if type(states) is str:
             states = [states]
+            
         opty_states = np.array([s.name for s in self.prob.collocator.state_symbols])
         
         indices = np.zeros(len(states), dtype=int)
@@ -887,8 +1172,8 @@ class ControlIdentifier:
                   self.data_dict["v"][0],
                   self.data_dict["delta"][0],
                   self.data_dict["phi"][0],
-                  self.data_dict["ddelta"][0],
-                  self.data_dict["dphi"][0],
+                  self.data_dict["deltadot"][0],
+                  self.data_dict["phidot"][0],
                   ]
             
             if gains is None and poles is None:
@@ -1119,24 +1404,31 @@ class ControlIdentifier:
         igstable : bool
             Indicate if the initial guess was stable. 
         """
+
+        self._transform_solution("E")
+        self._transform_input_data("E")
         
         # ------ Evaluate -----------------------------------------------------
         states, temp1, gains = parse_free(self.solution, self.n_states*self.n_reps, 0, self.N)
         
-        self.gains = list(gains)
-        
         self.eval = {}
         self.eval['state_names'] = [self.state_names[i] for i in range(self.n_states)]
-        self.eval['param_names'] = [p.name[:-1] for p in self.prob.collocator.unknown_parameters]
         self.eval['VAF'] = np.zeros(self.n_states)
         self.eval['MAE'] = np.zeros(self.n_states)
         
-        #add known gains and values
-        for k, v in self.known_gain_map.items():
-            self.eval['param_names'].append(k.name[:-1])
-            self.gains.append(v)
+        #add gains
+        self.gains = []
+        self.eval['param_names'] = []
+        gain_dict = self._opty_to_dict(gains, add_known=True)
+        for k in self.param_names:
+            self.eval['param_names'].append(k)
+            self.gains.append(float(gain_dict[k]))
         
         self.eval['stability-initial-guess'] = igstable
+        if self.eval_range is not None:
+            self.eval['n_eval'] = self.eval_range[1]-self.eval_range[0]
+        else:
+            self.eval['n_eval'] = self.N
         
         # VAF and MAE
         for i in range(self.n_states):
@@ -1146,6 +1438,9 @@ class ControlIdentifier:
                 finite = np.isfinite(self.data_dict[state_name][:-1])
                 data_m = self.data_dict[state_name][:-1][finite]
                 data_c = states[state_index,:self.N_data][finite]
+                if self.eval_range is not None:
+                    data_m = data_m[self.eval_range[0]:self.eval_range[1]]
+                    data_c = data_c[self.eval_range[0]:self.eval_range[1]]
                 evaluator = pm.RegressionMetric(data_m, data_c)
                 
                 results = evaluator.get_metrics_by_list_names(["VAF", "MAE"])
@@ -1157,42 +1452,17 @@ class ControlIdentifier:
                 self.eval['MAE'][i] = None
             
         # euclidian error of the position
-        pos_calib = states[self.get_opty_state_ids(['p_x','p_y']),:self.N_data].T
+        pos_est = states[self.get_opty_state_ids(['p_x','p_y']),:self.N_data].T
         pos_meas = np.c_[self.data_dict['p_x'][:-1], self.data_dict['p_y'][:-1]]
-        
-        finite = np.isfinite(self.data_dict['p_x'][:-1])
-        pos_calib = pos_calib[finite,:]
-        pos_meas = pos_meas[finite,:]
-        
-        self.eval['position_error'] = np.mean(np.sqrt(np.nansum((pos_calib - pos_meas)**2, axis=1)))
-        
-        # euclidian error of the pose
-        r2d = 180 / np.pi
-        angle_factor = 0.1  #10 deg error equals 1m error
-        pose_calib = states[self.get_opty_state_ids(['p_x','p_y', 'psi']),:self.N_data].T
-        pose_meas = np.c_[self.data_dict['p_x'][:-1], self.data_dict['p_y'][:-1], self.data_dict['psi'][:-1]]
-        
-        pose_calib = pose_calib[finite,:]
-        pose_meas = pose_meas[finite,:]
-        
-        pose_calib *= np.array([1,1,angle_factor*r2d])
-        pose_meas *= np.array([1,1,angle_factor*r2d])         
-                              
-        self.eval['pose_error'] = np.mean(np.sqrt(np.nansum((pose_calib - pose_meas)**2, axis=1)))
-        
-        # euclidian error of the lateral dynamics
-        if 'phi' in self.state_names and 'psi' in self.state_names:
-            r2d = 180 / np.pi
-            lat_calib = states[self.get_opty_state_ids(['phi', 'delta']),:self.N_data].T
-            lat_meas = np.c_[self.data_dict['phi'][:-1], self.data_dict['delta'][:-1]]
-            
-            lat_calib *= np.array([r2d, r2d])
-            lat_meas *= np.array([r2d, r2d])         
-            
-            self.eval['lat_error'] = np.mean(np.sqrt(np.nansum((lat_calib - lat_meas)**2, axis=1)))
-            
-        else:
-            self.eval['lat_error'] = None
+
+        if self.eval_range is not None:
+            pos_est = pos_est[self.eval_range[0]:self.eval_range[1]]
+            pos_meas = pos_meas[self.eval_range[0]:self.eval_range[1]]
+
+        dist = np.sqrt(np.sum((pos_est - pos_meas)**2, axis=1))
+        self.eval['ADE'] = np.nanmean(dist)
+        self.eval['RMSE'] = np.sqrt(np.nanmean(dist**2))
+        self.eval['maxD'] = np.nanmax(dist)
        
         # stability and poles
         stable, poles = self._test_stability(gains)
@@ -1308,6 +1578,61 @@ class ControlIdentifier:
         print("Evaluation")
         print("----------")
         print(f"Objective:   {self.info['obj_val']:.8f}")
+
+
+    def pole_sensitivity_analysis(self):
+
+        xbr_t = [s(self.t) for s in self.states[:5]]
+        fbr = - sm.Matrix(self.f[:5]) + sm.Matrix([xbr_t]).T.diff(self.t)
+
+        #substitiute p_x_c/p_y_c with psic
+        p_x_c, p_y_c, v, psi_c = sm.symbols("p_x_c p_y_c v psi_c", cls=sm.Function)
+        pos_state_ids = np.array(self.pos_state_ids)
+        psic = sm.atan((p_y_c(self.t) - self.states[pos_state_ids[1]](self.t)) / (p_x_c(self.t) - self.states[pos_state_ids[0]](self.t)))
+        fbr=fbr.subs({psic: psi_c(self.t)})
+
+        ubr_t = sm.Matrix([psi_c(self.t)])
+
+        Abr = fbr.jacobian(xbr_t)
+        Bbr = fbr.jacobian(ubr_t)
+
+        soldict = self.get_solution_dict()
+        gains = soldict['solution']['gains']
+        speed_map = {v(self.t): np.mean(self.known_trajectory_map[v(self.t)])}
+        gain_map = {self.params[self.param_names.index(gname)]:val for gname, val in gains.items()}
+        Abr_num = np.array(Abr.subs(gain_map).subs(speed_map), dtype=float)
+        poles = np.linalg.eigvals(Abr_num)
+
+        lam = sm.symbols("lambda")
+        chareq = (lam*sm.eye(Abr.rows) - Abr.subs(speed_map)).det()
+        K = sm.Matrix(self.params)
+        lam_sens = chareq.diff(K) / chareq.diff(lam)
+
+        J = np.zeros((5,5), dtype=complex)
+        for i, p in enumerate(poles):
+            J[i,:] = np.array(lam_sens.subs(gain_map).subs({lam:p}), dtype=complex).flatten()
+
+        # analyze sensitivity
+        U, s, Vh = np.linalg.svd(J, full_matrices=False)
+
+        msg = f"Pole sensitivity {self.id}"
+        print(msg)
+        print("-"*len(msg))
+        for i, si in enumerate(s):
+            print(f"s_{i}: {si:.2e}, v_{i}: [", end="")
+            for j, v in enumerate(Vh[i]):
+                val = f"{np.abs(v):.2f}"
+                if j+1 < Vh[i].size:
+                    end=", "
+                else:
+                    end="]\n"
+                print(val, end=end)
+
+
+        #U, S, Vh = np.linalg.svd(J)
+        #N = null_space(J)
+        #print(N)
+        pass
  
         
 class IDSessionManager:
@@ -1327,6 +1652,7 @@ class IDSessionManager:
                  ipopt_config={},
                  dir_results='results',
                  command_time_shift = None,
+                 eval_range = None,
                  note=None, 
                  gain_guess_mode = None,
                  feasible_initial_guesses=True,
@@ -1431,6 +1757,9 @@ class IDSessionManager:
         if command_time_shift == 0:
             command_time_shift = None
         self.max_offset = None
+
+        #evaluation range
+        self.eval_range = eval_range
 
         self.gain_guess_mode = gain_guess_mode
         self.gain_limits = None
@@ -1650,7 +1979,7 @@ class IDSessionManager:
                 msg += f"{e};"  
             
         #distance metrics
-        for m in ['position_error', 'pose_error', 'lat_error']:
+        for m in ['ADE', 'RMSE', 'maxD']:
             if m in evaluation:
                 msg += f"{evaluation[m]};"
        
@@ -1707,7 +2036,7 @@ class IDSessionManager:
                 header += f"{m}_{s};"  
             
         #distance metrics
-        for m in ['position_error', 'pose_error', 'lat_error']:
+        for m in ['ADE', 'RMSE', 'maxD']:
             if m in evaluation:
                 header += f"{m};"
                 
@@ -1768,14 +2097,14 @@ class IDSessionManager:
         
         identifier.print()
         
-    def _plot_best(self, sample_index, data_dict, name,  mode='data', write=True):
+    def _plot_best(self, sample_index, data_dict, eval_range, mode='data', write=True):
         """ Plot the best identification result. """
         
         id_best_guess = int(self.best_guesses[sample_index])
+        sample_id = self.sample_ids['splits'][sample_index]
         
         solution_file = os.path.join(self.solution_dir, 
                                      f"sol_{sample_index}-{id_best_guess}.pkl")
-        
 
         solution_dict = load_solution_dict(solution_file)
         if mode == 'data':
@@ -1786,30 +2115,30 @@ class IDSessionManager:
             raise ValueError((f"mode must be either 'data' or 'all'! Instead "
                               f"it was '{mode}'."))
         
-        state_keys = ['p_x', 'p_y', 'psi', 'v', 'delta', 'phi', 'p_y_c']
+        state_keys = ['p_x', 'p_y', 'psi', 'v', 'delta', 'phi', 'deltadot', 'phidot', 'p_y_c']
         t = solution_dict['t_s'] * np.arange(n)
         
-        fig, axes = plt.subplots(len(state_keys), 1, sharex=True)
+        fig, axes = plt.subplots(len(state_keys), 1, sharex=True, layout='constrained')
+        fig.set_size_inches(9, 7.5)
+        axes[-1].set_xlabel("t [s]")
         
         #track axis scaling
-        maxmin = np.zeros((9,2))
+        maxmin = np.zeros((len(state_keys),2))
         maxmin[:,0] = np.inf
         maxmin[:,1] = -np.inf        
-        def test_maxmin(data, i):
-            
+        def test_maxmin(data, i):  
             datamin = np.amin(data)
             if np.isfinite(datamin):
                 maxmin[i,0] = min(datamin, maxmin[i,0])
-            
             datamax = np.amax(data)
             if np.isfinite(datamax):
                 maxmin[i,1] = max(datamax, maxmin[i,1])
+
         
         for i in range(len(state_keys)):
-            
             skey = state_keys[i]
+            axes[i].fill_betweenx([-100, 100], 0, t[eval_range[0]], color='gray', alpha=0.3)
             axes[i].set_ylabel(skey)
-            
             axes[i].plot(t, data_dict[skey][:n], label = 'measured')
             test_maxmin(data_dict[skey][:n], i)
             
@@ -1827,16 +2156,16 @@ class IDSessionManager:
                         test_maxmin(data, i)
                     
         #plot xy
-        fig2, axes2 = plt.subplots(1,1)
-        fig2.set_size_inches(13, 5)
+        fig2, axes2 = plt.subplots(1,1, layout='constrained')
+        fig2.set_size_inches(13, 3)
         axes2.set_aspect('equal')
-        axes2.set_ylabel('y')
-        axes2.set_xlabel('x')
+        axes2.set_ylabel('y [m]')
+        axes2.set_xlabel('x [m]')
         
         axes2.plot(data_dict['p_x'][:n], 
                      data_dict['p_y'][:n], label = 'measured')
-        test_maxmin(data_dict['p_x'][:n], 7)
-        test_maxmin(data_dict['p_y'][:n], 8)
+        test_maxmin(data_dict['p_x'][:n], 0)
+        test_maxmin(data_dict['p_y'][:n], 1)
         
         
         for key in ['initial_guess', 'solution']:
@@ -1847,31 +2176,29 @@ class IDSessionManager:
                               label = key, color='gray')
             else:
                 axes2.plot(states['p_x'][:n], states['p_y'][:n], label=key)
-                test_maxmin(states['p_x'][:n], 7)
-                test_maxmin(states['p_y'][:n], 8)
+                test_maxmin(states['p_x'][:n], 0)
+                test_maxmin(states['p_y'][:n], 1)
                 
         axes2.legend()
-        axes2.set_title((f'Best identification result {name}/'
-                   f'{id_best_guess}'))
-        axes[0].set_title((f'Best identification result {name}/'
-                   f'{id_best_guess}'))
+
+        titletext = (f'Best identification result {sample_id}\n'
+                     f'Session {self.tag}, sample {sample_index}/{self.n_samples}, guess {id_best_guess}/{self.n_guesses}, obj={self.error_array[id_best_guess]:.2e}')
+        axes2.set_title(titletext)
+        axes[0].set_title(titletext)
         
         #set axis scaling
+        dmaxmin = .1*np.abs(np.diff(maxmin, axis=1))
         for i in range(len(state_keys)):
-            axes[i].set_ylim(maxmin[i,0]-.1*np.abs(maxmin[i,0]), 
-                             maxmin[i,1]+.1*np.abs(maxmin[i,1]))
+            axes[i].set_ylim(maxmin[i,0]-dmaxmin[i], maxmin[i,1]+dmaxmin[i])
             axes[i].set_xlim(t[0], t[-1])    
-            
-        axes2.set_ylim(maxmin[8,0]-.1*np.abs(maxmin[8,0]), 
-                          maxmin[8,1]+.1*np.abs(maxmin[8,1]))
-        axes2.set_xlim(maxmin[7,0]-.1*np.abs(maxmin[7,0]), 
-                          maxmin[7,1]+.1*np.abs(maxmin[7,1]))
+        axes2.set_ylim(maxmin[1,0]-dmaxmin[1], maxmin[1,1]+dmaxmin[1])
+        axes2.set_xlim(maxmin[0,0]-dmaxmin[0], maxmin[0,1]+dmaxmin[0])
         
         if write:
             output_file_1=os.path.join(self.plot_dir,
-                                     f"trajt_{sample_index}-{id_best_guess}.png")
+                                     f"id{sample_index}_{sample_id}_t.png")
             output_file_2=os.path.join(self.plot_dir,
-                                     f"trajxy_{sample_index}-{id_best_guess}.png")
+                                     f"id{sample_index}_{sample_id}_xy.png")
             fig.savefig(output_file_1, dpi=300)
             fig2.savefig(output_file_2, dpi=300)
         
@@ -1882,7 +2209,7 @@ class IDSessionManager:
         
         l = None
         
-        fig, axes = plt.subplots(1, len(param_names), sharex=True,sharey=True,figsize=(15,10))
+        fig, axes = plt.subplots(1, len(param_names), sharex=True,sharey=True,figsize=(15,10), layout='constrained')
         
         plt.suptitle((f'Rider control identification\n{self.tag}'))
         
@@ -1891,6 +2218,7 @@ class IDSessionManager:
         
         for ax, pname in zip(axes, param_names):
             ax.set_ylabel(pname)
+            ax.set_xlabel(r"v [m/s]")
             ax.grid()
         
         for i in range(self.n_samples):
@@ -1923,7 +2251,7 @@ class IDSessionManager:
                     l = axes[j].plot(self.speeds[i], gains_plot[k], **markerstyle)
                     
                     if k == 0 and j==0:
-                        l = axes[j].plot(self.speeds[i], gains_plot[k], **markerstyle, label=f"split#{i}")
+                        l = axes[j].plot(self.speeds[i], gains_plot[k], **markerstyle, label=self.sample_ids['splits'][i])
                     else:
                         l = axes[j].plot(self.speeds[i], gains_plot[k], **markerstyle)
                         
@@ -1941,7 +2269,7 @@ class IDSessionManager:
         
         l = None
         
-        fig, ax = plt.subplots(1,1,figsize=(15,10))
+        fig, ax = plt.subplots(1,1,figsize=(15,10), layout='constrained')
         ax.set_ylabel("Im")
         ax.set_xlabel("Re")
         ax.set_title((f'Identified poles\n{self.tag}'))
@@ -1980,7 +2308,9 @@ class IDSessionManager:
             ax.plot(np.real(best_poles), np.imag(best_poles), 
                     linestyle='None', marker='o', markeredgecolor='red',
                     markerfacecolor='none', markersize = 10)
-            
+
+        ax.set_ylim(-30, 30)
+        ax.set_xlim(-10, 1)
         fig.legend()
         fig.savefig(os.path.join(self.plot_dir,"poles.png"), dpi=300)
         
@@ -1991,10 +2321,18 @@ class IDSessionManager:
         """ Load the trajectory data of the current sample. Apply timeshift. 
         """
 
+        def _replace_key(trk, old, new):
+            idx = trk.data_feature_keys.index(old)
+            trk.data_feature_keys[idx] = new
+
         dataman = RCIDDataManager(self.paths.getdir_data_processed())
         trk = dataman.load_split(self.sample_ids['splits'][sample_index], subset='steps')
+        _replace_key(trk, "dphi", "phidot")
+        _replace_key(trk, "ddelta", "deltadot")
+        _replace_key(trk, "dpsi", "psidot")
         data_dict = trk.to_dict()
-        data_dict['t'] = np.array(trk.get_relative_time())
+        t = np.array(trk.get_relative_time())
+        data_dict['t'] = t
     
         data_dict['target_locations'] = self.target_locations
             
@@ -2018,14 +2356,22 @@ class IDSessionManager:
         else:
             shift = None
         
+        if self.eval_range is not None:
+            eval_range = [self.eval_range[sample_index], trk.n]
+            logger.info(f"Evaluation range: {trk.t[eval_range[0]].strftime("%H:%M:%S.%f")} - {trk.t[eval_range[1]-1].strftime("%H:%M:%S.%f")}")
+            if shift is not None:
+                eval_range[0] -= shift
+                eval_range[1] -= shift
+        else:
+            eval_range = None
+        
         v_mean = np.mean(data_dict['v'])
         v_minmax = [np.min(data_dict['v']), np.max(data_dict['v'])]
-        
         
         self.speeds[sample_index] = v_mean
         logger.info(f"number of timesteps in data: {len(data_dict['t'])}")
         
-        return data_dict, v_minmax, v_mean, shift
+        return data_dict, v_minmax, v_mean, shift, eval_range
     
     
     def _load_initial_guesses(self, sample_index):
@@ -2048,13 +2394,14 @@ class IDSessionManager:
         plt.close("all")
         
         # ------ Get split data -----------------------------------------------
-        data_dict, v_minmax, v_mean, shift = self._load_data(sample_index)
+        data_dict, v_minmax, v_mean, shift, eval_range = self._load_data(sample_index)
         
         
         # ------ Identify -----------------------------------------------------
         
         self._make_gain_guesses(v_minmax, sample_index)
         self.opty_config['gain_bounds'] = self.gain_bounds
+        self.opty_config['eval_range'] = eval_range
         
         if shift is not None:
             name = (f'{self.tag}_shift{shift}/{sample_index}')
@@ -2126,7 +2473,7 @@ class IDSessionManager:
         self._find_best(sample_index)
         
         if self.plot_mode == 'best':
-            self._plot_best(sample_index, data_dict, name)
+            self._plot_best(sample_index, data_dict, eval_range)
             
         #log time
         t = time() - t0_split

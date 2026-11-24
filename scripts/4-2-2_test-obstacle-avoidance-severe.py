@@ -3,13 +3,12 @@
 @author: Christoph M. Konrad
 """
 
-from rcid.simulation import FixedSpeedStaticObstacleAvoidance
+from rcid.simulation import StrongerLeeObstacleAvoidance
 from rcid.pole_modelling import PoleModel
 
 from rcid.utils import read_yaml, get_default_parser
 from rcid.path_manager import PathManager
 
-import argparse
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -21,7 +20,7 @@ from pypaperutils.design import TUDcolors
 tudcolors = TUDcolors()
 
 def get_response_delay(paths, config, model):
-    rt_def = config['models'][model]['response_time_defintion']
+    rt_def = config['models'][model]['response_time_definition']
 
     rt_cs = pd.read_csv(paths.getfilepath_reactiontimes_csteer())
     rt_pp = pd.read_csv(paths.getfilepath_reactiontimes(rt_def))
@@ -56,7 +55,7 @@ def main():
     speed = config['processing'][scriptkey]['speed_kmh']/3.6
     n_samples = config['processing'][scriptkey]['n_predictions']
     pole_predictions, labels = pm.sample_poles(n_samples=n_samples, X_given=speed)
-    ax = FixedSpeedStaticObstacleAvoidance.make_scenario_plot(args.polemodel, speed)
+    ax = StrongerLeeObstacleAvoidance.make_scenario_plot(args.polemodel, speed)
 
     results = []
     trajs = []
@@ -74,14 +73,16 @@ def main():
         polestr = np.array2string(poles, precision=1, suppress_small=True)
         print(f", poles = {polestr}", end="")
         
-        scene = FixedSpeedStaticObstacleAvoidance(bikemodel, speed, poles, i, response_time=tau, animate=False, verbose=False)
-        scene.run()
+        scene = StrongerLeeObstacleAvoidance(bikemodel, speed, poles, i, response_time=tau, animate=False, verbose=False)
+        trun, frun = scene.run()
+        print(f", t_run={trun:.2f} s, f_run={frun:.0f} Hz")
+
         ttc_min_i, t_ttc_min_i, ttc_mean, ax = scene.analyze_TTC(ax=ax)
         idx_ttc_min_i = int(round(t_ttc_min_i/scene.bike.params.t_s))
         x_ttc_min_i = scene.bike.traj[0,idx_ttc_min_i]
         y_ttc_min_i = scene.bike.traj[1,idx_ttc_min_i]
         psi_ttc_min_i = scene.bike.traj[2,idx_ttc_min_i]
-        results.append(poles.tolist()+[labels[i], t_ttc_min_i, idx_ttc_min_i, x_ttc_min_i, y_ttc_min_i, psi_ttc_min_i, ttc_min_i])
+        results.append(poles.tolist()+[labels[i], t_ttc_min_i, idx_ttc_min_i, x_ttc_min_i, y_ttc_min_i, psi_ttc_min_i, ttc_min_i, trun, frun, scene.t_build_bike])
         print(f", ttc = {ttc_min_i:.2f} s")
 
         #store trajectory
@@ -94,7 +95,7 @@ def main():
 
     #make result table
     #results = np.array(results)
-    column_names = [f"p{i}" for i in range(pole_predictions.shape[1])] + ['pole_label', 't_ttc_min', 'idx_ttc_min', 'x_ttc_min', 'y_ttc_min', 'psi_ttc_min', 'ttc_min']
+    column_names = [f"p{i}" for i in range(pole_predictions.shape[1])] + ['pole_label', 't_ttc_min', 'idx_ttc_min', 'x_ttc_min', 'y_ttc_min', 'psi_ttc_min', 'ttc_min', 'T_run_s', 'f_run_hz', 'T_build_s']
     result_table = pd.DataFrame(results, columns=column_names)
 
     # make ttc-histogram plot
@@ -128,7 +129,10 @@ def main():
         with open(filepath_trajectories, 'wb') as f:
             pkl.dump(dump, f)
 
-    plt.show(block=True)
+    if args.interactive:
+        plt.show(block=True)
+    else:
+        plt.close("all")
 
 if __name__ == "__main__":
     main()

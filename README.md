@@ -61,7 +61,7 @@ Find instructions how to reuse the trained models or how to run the full analysi
 
 > [!NOTE]
 > 
-> We intend to fully merge the calibrated and tested models into our cyclist traffic simulation framework [chris-konrad/cyclistsocialforce](https://github.com/chris-konrad/cyclistsocialforce) for more convenient application. When this is finished, this repository will remain active as a reference for the paper and for calibrating/testing the models.
+> Th calibrated and tested models have been merged into our cyclist traffic simulation framework [chris-konrad/cyclistsocialforce](https://github.com/chris-konrad/cyclistsocialforce) for more convenient application. For re-using the models, we recommend to visit `cyclistsocialforce`. The `stochastic-balancing-rider` repository will remain active as a reference for the paper and for calibrating/testing the models.
 
 To reuse the models generated in the present thesis, the following steps have to be executed.
 
@@ -79,7 +79,7 @@ To reuse the models generated in the present thesis, the following steps have to
 
 This repository contains two model variants. See the corresponding publication for details.
 
-- **Balancing Rider (`BR0`, `BR1`):** A mechanical model of the upright bicycle with full-state feedback control to emulate the rider's control effort. `BR1` represents a reduced variant of the full-state feedback with the steer rate gain set to 0. Consult the paper for detailed insights into which model to use. For normal riding, we recommend to start with the more robust `BR1`.
+- **Balancing Rider (`BR4` and `BR5`):** A mechanical model of the upright bicycle with full-state feedback control to emulate the rider's control effort. `BR4` is the reduced-parameter version named BR_1 in the revised paper. `BR5` has all full-state feedback paramters. 
 
 - **Planar Point (`PP0`)**: A planar moving point tracking the commanded heading representing bicycle and rider. Used for benchmarking and not recommended in any application scenarios.
 
@@ -117,7 +117,7 @@ The figure below explains all steps of the pipeline. Some scripts need to be exe
 
 - **Modeling Behavioral Distributions:** These steps fit stochastic models to the identified behavioral parameters. Each script needs to be executed once per model.
 
-- **Testing:** These scripts test the predicted trajectory distribution and the model performance in an obstacle avoidance scenario.
+- **Testing:** These scripts test the predicted trajectory distribution and the model performance in two obstacle avoidance scenarios and a left-turn scenario. Separately test the simulation runtime without animation.
 
 ![processing pipeline](./assets/analysis-flowchart.png)
 
@@ -137,4 +137,6 @@ The bicycle parameters in `/packages/rcid/src/rcid/params` are derived from data
 
 If you use this software in your research, please cite our corresponding publication:
 
-Konrad, C. M., Happee, R., Moore, J. K., & Dabiri, A. (2025). *Stochastic Control Behavior of the Balancing Rider for Cycling Safety in Traffic Simulation*. Preprint. Engineering Archive. https://doi.org/10.31224/6107
+Konrad, C. M., Happee, R., Moore, J. K., & Dabiri, A. (in press). *Stochastic Control Behavior of the Balancing Rider for Cycling Safety in Traffic Simulation*. Transportation Research Part C: Emerging Technologies
+
+The preprint that was later submitted for publication at Transportation Research Part C: Emerging Technologies can be found at https://doi.org/10.31224/6107.  

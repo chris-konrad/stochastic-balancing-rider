@@ -29,7 +29,7 @@ from datetime import datetime
 
 from sklearn.mixture import GaussianMixture as SklearnGaussianMixture
 from sklearn.mixture._gaussian_mixture import _compute_precision_cholesky
-from sklearn.preprocessing import StandardScaler, PowerTransformer, FunctionTransformer
+from sklearn.preprocessing import StandardScaler, PowerTransformer
 from sklearn.model_selection import cross_validate
 from sklearn.linear_model import LinearRegression
 
@@ -38,7 +38,6 @@ from scipy.stats import multivariate_normal, gaussian_kde, ks_2samp
 from rcid.simulation import FixedInputZigZagTest, FixedSpeedStepResponses
 from rcid.simulation import FixedSpeedBalancingRiderBicycle, FixedSpeedPlanarPointBicycle
 from rcid.utils import read_yaml
-from rcid.path_manager import PathManager
 from rcid.data_processing import RCIDDataManager
 
 from pypaperutils.design import TUDcolors
@@ -64,12 +63,12 @@ def get_outliers_all_models(paths, models):
         if i == 0:
             df = df_i.rename(columns={'outliers': col})
         else:
-            df = df.merge(df_i, on='sample_id')
+            df = df.merge(df_i, on='sample_id', how='outer')
             df.rename(columns={'outliers': col}, inplace=True)
             
-    df['outliers'] = df[outlier_cols].any(axis=1)
+    df['outliers_all'] = df[outlier_cols].any(axis=1)
 
-    print(f"Number of samples: {df.shape[0]-df['outliers'].sum()} (ignoring {df['outliers'].sum()} outliers across {models})")
+    print(f"Number of samples: {df.shape[0]-df['outliers_all'].sum()} (ignoring {df['outliers_all'].sum()} outliers across {models})")
 
     return df
 
@@ -386,6 +385,23 @@ class GaussianMixture(SklearnGaussianMixture):
 
         return locations.reshape(-1,2), densities.flatten()
 
+    def get_calibration_frequencies(self, X_test, n_levels=101, n_samples=1e6):
+
+        samples, _ = self.sample(n_samples)
+        logpdf = self.score_samples(samples)
+        logpdf_test = self.score_samples(X_test)
+
+        frequencies= []
+
+        levels = np.linspace(0, 1, n_levels)
+        for l in levels:
+            th_i = np.quantile(logpdf, 1-l)
+
+            f_i = np.mean(logpdf_test >= th_i)
+            frequencies.append(f_i)
+        
+        return levels, frequencies
+
 
 class ConditionalGaussianMixture(GaussianMixture):
     """ Describes a conditional multivariate GaussianMixture.
@@ -579,7 +595,50 @@ class ConditionalGaussianMixture(GaussianMixture):
         labels = np.array(labels).flatten()
 
         return samples, labels
-    
+
+
+    def score_samples(self, X):
+        """ Compute the log-likelihood of each sample.
+
+        Parameters
+        ----------
+        X_given : array-like
+            List of n_features-dimensional data points. Each row corresponds to a single data point. Includes given features in column
+            ConditionalGaussianMixture.feature_index_given.
+        
+        Returns
+        -------
+        log_prob: array
+            Log-likelihood of each sample in X under the current model.
+        """ 
+
+        log_prob = np.zeros(X.shape[0]) * np.nan
+
+        todo = np.ones_like(log_prob, dtype=bool)
+
+        i = 0
+        while i < X.shape[0]:
+
+            x_given_i = X[i, self.feature_index_given]
+
+            indices = np.argwhere(X[:, self.feature_index_given]==x_given_i)
+
+            X_i = X[indices, self.feature_indices_marginals]
+
+            gmm_cond = self._get_conditional_gmm(x_given_i)
+            log_prob[indices.flatten()] = gmm_cond.score_samples(X_i)
+
+            todo[indices] = False
+
+            if not np.any(todo):
+                break
+            else:
+                i = np.min(np.argwhere(todo))
+
+        assert np.all(np.isfinite(log_prob))
+
+        return log_prob
+
 
     def eval_conditional_marginal_pdf(self, ylim, x_given, idx_y, n_samples=200):
         """ Evaluate the marginal conditional pdf N(Y=y|X=x_given). 
@@ -621,18 +680,47 @@ class ConditionalGaussianMixture(GaussianMixture):
         return y, densities
 
 
+    def get_calibration_frequencies(self, X_test, n_levels=101, n_samples=1e6):
+
+        n_samples = int(n_samples)
+        X_given = X_test[:, self.feature_index_given]
+
+        levels = np.linspace(0, 1, n_levels)
+        frequencies= np.empty_like(levels, dtype=float)
+
+        logpdf_test = self.score_samples(X_test)
+
+        inside = np.zeros((X_test.shape[0], levels.size), dtype=bool)
+
+        for i, xgiven in enumerate(X_given):
+            samples, _ = self.sample(n_samples, [xgiven])
+            X_samples = np.empty((n_samples, X_test.shape[1]))
+            X_samples[:, self.feature_index_given] = xgiven
+            X_samples[:, self.feature_indices_marginals] = samples
+            logpdf = self.score_samples(X_samples)
+
+            for j, l in enumerate(levels):
+                th_j = np.quantile(logpdf, 1-l)
+                inside[i,j] = logpdf_test[i] >= th_j
+
+        frequencies = np.mean(inside, axis=0)
+        
+        return levels, frequencies
+
 
 class PoleSorter():
 
     # CLASS CONSTANTS
     SORTING_METHODS = ["magnitude", "argument", "frequency", "decay", "none"]
-    REQUIRED_PATHS = ["filepath_identification_result", "dir_out"]
+    REQUIRED_PATHS = ["filepath_identification_result", "dir_out", "filepath_identifiability"]
     SUBDIRS = {"output-dirname": "pole-modeling"}
     OUTPUT_FNAMES = {"standard-stepresponses": "standard-stepresponses",
                      "pole-sorting-result": "sorted-poles"}
 
-    def __init__(self, paths, method_real="decay", method_complex="frequency", riderbike_model='BR0', threshold_obj=10e-4, gainlimits=[-250,250],
-                 timedomain_outlier_zscore=3, timedomain_outlier_testperiod=[0.5,10], bikemodel='balancingrider', save=False):
+    def __init__(self, paths, method_real="decay", method_complex="frequency", riderbike_model='BR0', identification_outlier_thobj=1.5, threshold_conditionnum=1e4,
+                 gainlimits=[-250,250],
+                 timedomain_outlier_zscore=3, timedomain_outlier_testperiod=[0.5,20], min_stepresponse_length=2.5,
+                 bikemodel='balancingrider', save=False):
         """ Create a pole sorter object.
 
         Sorts poles according to the selected sorting method, identifies outliers and converts poles to pole features.
@@ -656,7 +744,10 @@ class PoleSorter():
             Model id of the riderbikemodel to build the model on. Must be any of the riderbikemodels in the config. Default is
             "BR0". 
         threshold_obj : float, optional
-            Identification objective value threshold to classify a set op poles as outliers. Default is 10e-4.
+            Identification objective value threshold multiplier to classify a set op poles as outliers. A pole is an outlier, if 
+            obj > Q3 + threshold_obj * IQR. Default is 1.0
+        threshold_conditionnum : float, optional
+            The maximum condition number of the Fisher Identification matrix of a sample to considered an inlier. Default is 1e4.
         gain_limits : list or dict, optional
             Identification gain limits for classifying identifications at the gain limits as outliers. Must be a list [min, max]
             that is valid for all gains or a dictionary of limits per gain {gain: [min, max]}. Default is [-250, 250].
@@ -664,6 +755,8 @@ class PoleSorter():
             Number of standard deviations to classify the step response of a set of poles as an outlier.
         timedomain_outlier_testperiod : list, optional
             Time period to evaluate the distribution of step responses generated by the pole sets for detecting outliers.
+        min_stepresponse_length : float, optional
+            The minimum time after a command step in the dataset. Default is 2.5s
         bikemodel : str, optional
             The riderbike model type. E.g., 'balancingrider' or 'planarpoint'. The default is 'balancingrider'. 
         save : bool, optional
@@ -679,15 +772,20 @@ class PoleSorter():
         self.paths = self._check_paths(paths)
         self.riderbike_model = riderbike_model
 
-        self.identifications = pd.read_csv(self.paths["filepath_identification_result"], sep=";")
+        self.identifications = pd.read_csv(self.paths["filepath_identification_result"], sep=";", index_col=0)
+
+        identifiability = pd.read_csv(self.paths['filepath_identifiability'], sep=";")[['sample_id', 'condition_num']]
+        self.identifications = self.identifications.merge(identifiability, on='sample_id')
 
         #outlier detection
         self.timedomain_outlier_zscore = timedomain_outlier_zscore
         self.timedomain_outlier_testperiod = timedomain_outlier_testperiod
+        self.min_stepresponse_length = min_stepresponse_length
         self.bikemodel = bikemodel
 
-        self.identification_outlier_thobj = threshold_obj
+        self.identification_outlier_thobj = identification_outlier_thobj
         self.identification_outlier_gainlimits = gainlimits
+        self.threshold_conditionnum = threshold_conditionnum
 
         
     def _check_method(self, method):
@@ -718,7 +816,6 @@ class PoleSorter():
             os.makedirs(paths['dir_out'])
 
         return paths
-
 
     def _get_standardstepresponses(self):
         """ Return the standard step responses. 
@@ -753,7 +850,8 @@ class PoleSorter():
             if dump['poles'].size != pole_array.size:
                 test_poles = False
             else:
-                test_poles = np.all(dump['poles'] == pole_array)
+                finite = np.all(np.isfinite(dump['poles']), axis=1)
+                test_poles = np.all(dump['poles'][finite,:] == pole_array[finite,:])
             if not (test_files and test_speeds and test_poles):
                 raise ValueError(f"The recovered standard stepresponses at {filepath_steps} do not correspond to the current pole data!")
             
@@ -775,6 +873,9 @@ class PoleSorter():
         #figX, axX = plt.subplots(1,1)
         LD = np.zeros((1, trajs[0].shape[1], len(trajs)))
         for i, trj in enumerate(trajs):
+            if trj is None:
+                LD[0,:,i] = np.nan
+                continue
             xy = evaluator._rotate_sample(trj[0,:], trj[1,:])
             LD[0, :, i] = xy[1,:]
             #axX.plot(LD[0, :, i])
@@ -783,7 +884,7 @@ class PoleSorter():
         #evaluator.eval_groundtruth_metrics()
         #evaluator.plot_histograms()
 
-        return trajs, LD, pole_array, poles
+        return files, trajs, LD
 
 
     def _find_outliers_responsetime(self):
@@ -797,21 +898,27 @@ class PoleSorter():
             idx = np.argwhere(row['sample_id']==self.identifications['sample_id'][:-4]).flatten()
             outliers_rt[idx] = row['outlier_response_time']
 
-        n_outliers_rt = np.sum(np.logical_and(outliers_rt, np.logical_not(self.identifications['outliers'])))
-        print(f"    + N(response time): {n_outliers_rt} ({100*n_outliers_rt/self.identifications.shape[0]:.1f} %)")
+        n_outliers_rt = np.sum(outliers_rt)
+        print(f"   N(response time): {n_outliers_rt} ({100*n_outliers_rt/self.identifications.shape[0]:.1f} %)")
 
         self.identifications['outliers_response_time'] = outliers_rt
         self.identifications['outliers'] = np.logical_or(outliers_rt, self.identifications['outliers'])
     
     
     def _find_outliers_objective(self):
-        """ Identify identification results that exceed the objective value threshold self.identification_outlier_thobj
+        """ Identify identification results that exceed the objective value threshold  of q3 + iqr * self.identification_outlier_thobj
         """
 
+        obj = self.identifications['objective']
+        q1 = obj.quantile(0.25)
+        q3 = obj.quantile(0.75)
+        iqr = q3 - q1
+        max_obj = q3 + iqr * self.identification_outlier_thobj 
+
         # bad objective value
-        outliers_objective = self.identifications['objective'] > self.identification_outlier_thobj
-        n_outliers_objective = np.sum(np.logical_and(outliers_objective, np.logical_not(self.identifications['outliers'])))
-        print(f"    + N(objective > {self.identification_outlier_thobj}): {n_outliers_objective} ({100*n_outliers_objective/self.identifications.shape[0]:.1f} %)")
+        outliers_objective = self.identifications['objective'] > max_obj
+        n_outliers_objective = np.sum(outliers_objective)
+        print(f"   N(objective > {max_obj:.2e}): {n_outliers_objective} ({100*n_outliers_objective/self.identifications.shape[0]:.1f} %)")
 
         self.identifications['outliers_objective'] = outliers_objective
         self.identifications['outliers'] = np.logical_or(outliers_objective, self.identifications['outliers'])
@@ -824,28 +931,43 @@ class PoleSorter():
         # at gain limits
         outliers_gains = np.zeros(self.identifications.shape[0], dtype=bool)
         for k in self.identification_outlier_gainlimits:
-            lim = np.array(self.identification_outlier_gainlimits[k])
-            if lim[0] == 0.0:
-                lim[0] = -np.inf
-            if lim[1] == 0.0:
-                lim[1] = np.inf
             if k == 'k_psi':
                 lim = np.array([0])
             else:
                 continue
             lim = np.reshape(lim, (1,-1))
-            outliers_k = np.sum(np.abs((lim - self.identifications[k].to_numpy()[:,np.newaxis])) < 0.01, axis=1).astype(bool)
+            outliers_k = np.sum(np.abs((lim - self.identifications[k].to_numpy()[:,np.newaxis])) < 3, axis=1).astype(bool)
             
             outliers_gains = np.logical_or(outliers_gains, outliers_k)
 
-        n_outliers_gains = np.sum(np.logical_and(outliers_gains, np.logical_not(self.identifications['outliers'])))
-        print(f"    + N(gain at limit): {n_outliers_gains} ({100*n_outliers_gains/self.identifications.shape[0]:.1f} %)")
+        n_outliers_gains = np.sum(outliers_gains)
+        print(f"   N(gain at limit): {n_outliers_gains} ({100*n_outliers_gains/self.identifications.shape[0]:.1f} %)")
 
         self.identifications['outliers_gains'] = outliers_gains
         self.identifications['outliers'] = np.logical_or(outliers_gains, self.identifications['outliers'])
         
         return self.identifications
-    
+
+    def _find_outliers_identifiability(self):
+
+        self.identifications['outliers_identifiability'] = self.identifications['condition_num'] > self.threshold_conditionnum
+        n_outliers_ifty = np.sum(self.identifications['outliers_identifiability'])
+        print(f"   N(kappa > {self.threshold_conditionnum:.2e}): {n_outliers_ifty} ({100*n_outliers_ifty/self.identifications.shape[0]:.1f} %)")
+
+        self.identifications['outliers'] = np.logical_or(self.identifications['outliers_identifiability'], self.identifications['outliers'])
+
+
+    def _find_outliers_decay(self):
+
+        max_real = np.log(2/3) / self.min_stepresponse_length
+        real_pole_columns = [c for c in self.identifications.columns if c.endswith("_real")]
+        self.identifications['outliers_decay'] = (self.identifications[real_pole_columns] > max_real).any(axis=1)
+
+        n_outliers_timedomain = np.sum(self.identifications['outliers_decay'])
+        print(f"   N(min(Re(p)) > {max_real:.2f}): {n_outliers_timedomain} ({100*n_outliers_timedomain/self.identifications.shape[0]:.1f} %)")
+
+        self.identifications['outliers'] = np.logical_or(self.identifications['outliers_decay'], self.identifications['outliers'])
+
 
     def _find_outliers_timedomain(self):
         """ Identify outliers whose step-response exceeds a certain z-value of the distribution of step-responses.
@@ -857,77 +979,75 @@ class PoleSorter():
         T_test = self.timedomain_outlier_testperiod
 
         # simulated trajectories
-        trajs, LD, pole_array, id_inliers = self._get_standardstepresponses()
+        sample_ids, trajs, LD = self._get_standardstepresponses()
 
         # find timedomain outliers
         traj_shape = trajs[0].shape
         N = int((T_test[1]-T_test[0])/t_s)
         t_begin = int(T_test[0]/t_s)
         t = np.arange(traj_shape[1]) * t_s
-        t_end = traj_shape[1]
+        t_end = min(int(T_test[1]/t_s), traj_shape[1])
 
         if self.bikemodel == 'balancingrider':
             feature_map = {'p_x':0, 'p_y':1, 'psi':2, 'phi':5, 'delta':4}
-            features_to_filter = ['psi'] #['delta']
+            features_to_filter = [] #['delta']
             traj_array = np.zeros((len(features_to_filter)+1, traj_shape[1], len(trajs)))
         else:
             feature_map = {'p_x':0, 'p_y':1, 'psi':2}
-            features_to_filter = ['psi']
+            features_to_filter = []
             traj_array = np.zeros((len(features_to_filter)+1, traj_shape[1], len(trajs)))
 
         idx_features = [feature_map[f] for f in features_to_filter]
 
         for i in range(len(trajs)):
-            traj_array[1:,:,i] = trajs[i][idx_features, :]
+            if trajs[i] is None:
+                traj_array[1:,:,i] = np.nan
+            else:
+                traj_array[1:,:,i] = trajs[i][idx_features, :]
         traj_array[0, :, :] = LD
 
-        mean_per_sample = np.mean(traj_array, axis=2)
-        std_per_sample = np.std(traj_array, axis=2)
+        mean_per_sample = np.nanmean(traj_array, axis=2)
+        std_per_sample = np.nanstd(traj_array, axis=2)
 
-        interval_max_per_sample = mean_per_sample + z_score * std_per_sample
-        interval_min_per_sample = mean_per_sample - z_score * std_per_sample
+        q1 = np.percentile(traj_array, 25, axis=2)
+        q3 = np.percentile(traj_array, 75, axis=2)
+        iqr = q3 - q1
 
-        outlier_i = []
+        interval_max_per_sample = q3 + 1.5 * iqr #mean_per_sample + z_score * std_per_sample
+        interval_min_per_sample = q1 - 1.5 * iqr #mean_per_sample - z_score * std_per_sample
+
+        outliers_td = np.zeros((self.identifications.shape[0], len(features_to_filter)+1), dtype=bool)
+        outliers_td_baseinliers = np.zeros((len(sample_ids), len(features_to_filter)+1), dtype=bool)
         for i, f in enumerate(trajs):
             test_upper = traj_array[:,:,i] <= interval_max_per_sample
-            test_upper = np.all(test_upper[:,t_begin:t_end])
+            test_upper = np.all(test_upper[:,t_begin:t_end], axis=1)
             test_lower = traj_array[:,:,i] >= interval_min_per_sample
-            test_lower = np.all(test_lower[:,t_begin:t_end])
-            if not(test_upper and test_lower):
-                outlier_i.append(i)
-        outliers = np.zeros(len(trajs), dtype=bool)
-        outliers[outlier_i] = True
-        #poles['time-domain-outliers'] = outliers
-         
-        #test_loc_vals = np.array([evaluator.sample_metrics[m] for m in evaluator.test_loc_metrics]).T
-        #outliers = np.zeros_like(test_loc_vals.shape[0], dtype=bool)
+            test_lower = np.all(test_lower[:,t_begin:t_end], axis=1)
+            idx_sample = np.argwhere(self.identifications["sample_id"]==sample_ids[i]).flatten()[0]
 
-        #for i in range(test_loc_vals.shape[1]):
-        #    LDvals = test_loc_vals[:,i]
-        #    upper_lim = np.nanmean(LDvals) + z_score * np.nanstd(LDvals)
-        #    lower_lim = np.nanmean(LDvals) - z_score * np.nanstd(LDvals)
-
-        #    outliers = np.logical_or(outliers, np.logical_or(LDvals < lower_lim, LDvals > upper_lim))
-
-        #outliers = np.logical_or(outliers, np.any(np.real(pole_array>-0.03),axis=1))
-        outlier_i = np.argwhere(outliers).flatten()
-        inlier_i = np.argwhere(np.logical_not(outliers)).flatten()
+            outliers_i = np.logical_not(test_upper & test_lower)
+            outliers_td[idx_sample, :] = outliers_i
+            outliers_td_baseinliers[i, :] = outliers_i
 
         # add outliers to table and print
-        self.identifications['outliers_timedomain'] = self.identifications['sample_id'].isin(id_inliers.loc[outliers]['sample_id'])
-        
-        n_outliers_timedomain = np.sum(self.identifications['outliers_timedomain'])
-        n_outliers_timedomain_new = np.sum(np.logical_and(self.identifications['outliers_timedomain'], np.logical_not(self.identifications['outliers'])))
-        print(f"    + N(x(t) > {z_score}-sigma): {n_outliers_timedomain} ({100*n_outliers_timedomain/self.identifications.shape[0]:.1f} %)")
+        for j, f in enumerate(['LD']+features_to_filter):
+            self.identifications[f'outliers_time{f}'] = outliers_td[:,j]
 
-        self.identifications['outliers'] = np.logical_or(self.identifications['outliers_timedomain'], self.identifications['outliers'])
+            n_outliers_f = np.sum(outliers_td[:,j])
+            print(f"   N({f}(t) > {z_score}-sigma): {n_outliers_f} ({100*n_outliers_f/self.identifications.shape[0]:.1f} %)")
+
+        self.identifications['outliers'] = np.logical_or(np.any(outliers_td, axis=1), self.identifications['outliers'])
+
+        idx_out_td = np.argwhere(np.any(outliers_td_baseinliers, axis=1)).flatten()
+        idx_in_td = np.argwhere(np.logical_not(np.any(outliers_td_baseinliers, axis=1))).flatten()
 
         #plot over time
         features_to_filter = ["LD"] + features_to_filter
         fig_t, axes_t = plt.subplots(len(features_to_filter), 1, sharex=True, layout='constrained')
         if not isinstance(axes_t, np.ndarray):
             axes_t = np.array([axes_t])
-        for feat, ax in zip(features_to_filter, axes_t):
+        for j, (feat, ax) in enumerate(zip(features_to_filter, axes_t)):
+            idx_out_f = np.argwhere(outliers_td_baseinliers[:,j]).flatten()
             for z in range(1,z_score+1):
                 idx = features_to_filter.index(feat)
                 ax.fill_between(t, 
@@ -936,28 +1056,36 @@ class PoleSorter():
                                 color=cmap.colors[0],
                                 alpha=0.25)
             #line_inlier = ax.plot(t, mean_per_sample[idx,:], color = cmap.colors[0], label='inliers')
-            line_inlier = ax.plot(t, traj_array[idx,:,inlier_i].T, color = cmap.colors[2], linewidth = 1, label='outliers')
-            line_outlier = ax.plot(t, traj_array[idx,:,outlier_i].T, color = cmap.colors[6], linewidth = 1, label='outliers')
-
+            line_inlier = ax.plot(t, traj_array[idx,:,idx_in_td].T, color = cmap.colors[2], linewidth = 1, label=f'inliers_timedomain: {idx_in_td.size}')
+            line_outlier = ax.plot(t, traj_array[idx,:,idx_out_td].T, color = cmap.colors[6], linewidth = 1, label=f'outliers_timedomain: {idx_out_td.size}')
+            line_outlier_f = ax.plot(t, traj_array[idx,:,idx_out_f].T, color = "black", linewidth = 1, label=f'outliers_{feat}: {idx_out_f.size}')
             ax.set_ylabel(feat)
+            ax.legend(handles=[l[0] for l in [line_inlier, line_outlier, line_outlier_f] if len(l) > 0])
+
+            ax.plot(t, interval_max_per_sample[j, :], color="red", linestyle='dashed')
+            ax.plot(t, interval_min_per_sample[j, :], color="red", linestyle='dashed')
+            ax.plot(t, q1[j,:], color='red')
+            ax.plot(t, q3[j,:], color='red')
             
-        n_outliers = len(outlier_i)
-        axes_t[-1].legend(handles=[l[0] for l in [line_inlier, line_outlier] if len(l) > 0])
+        n_outliers = idx_out_td.size
         axes_t[-1].set_xlabel("t [s]")
-        axes_t[0].set_title(f"Time-distribution of standard step responses with {n_outliers_timedomain} LD outliers exceeding {z_score}-sigma.")
+        axes_t[0].set_title(f"Time-distribution of standard step responses with {n_outliers} outliers exceeding {z_score}-sigma.")
 
         #plot in space
         fig_xy, axes_xy = plt.subplots(1, 1, layout='constrained')
         axes_xy.set_aspect('equal')
         for i in range(traj_array.shape[2]):
-            if i in outlier_i: 
-                line_outlier = axes_xy.plot(trajs[i][0,:].T, trajs[i][1,:].T, color = cmap.colors[6], linewidth = 1, label='outliers', zorder=1000)
+            if i in idx_out_td: 
+                if trajs[i] is not None:
+                    line_outlier = axes_xy.plot(trajs[i][0,:].T, trajs[i][1,:].T, color = cmap.colors[6], linewidth = 1, label='outliers_timedomain', zorder=1000)
+                else:
+                    continue
             else:
-                line_inlier = axes_xy.plot(trajs[i][0,:].T, trajs[i][1,:].T, color = cmap.colors[0], linewidth = 1, alpha=0.3, label='inliers')
+                line_inlier = axes_xy.plot(trajs[i][0,:].T, trajs[i][1,:].T, color = cmap.colors[0], linewidth = 1, alpha=0.3, label='inliers_timedomain')
         axes_xy.set_xlabel('x [m]')
-        axes_xy.set_xlabel('y [m]')
+        axes_xy.set_ylabel('y [m]')
         axes_xy.legend(handles=[l[0] for l in [line_inlier, line_outlier] if len(l) > 0])
-        axes_xy.set_title(f"XY-Distribution of standard step responses with {n_outliers_timedomain} LD outliers exceeding {z_score}-sigma.")
+        axes_xy.set_title(f"XY-Distribution of standard step responses with {n_outliers} outliers exceeding {z_score}-sigma.")
 
         if self.save:
             
@@ -967,7 +1095,7 @@ class PoleSorter():
                 filepath = ""
 
             filepath_xy = os.path.join(self.paths["dir_out"], filepath+f"{self.OUTPUT_FNAMES["standard-stepresponses"]}_outliers_xy.png")
-            fig_xy.set_size_inches(16.5, 4.5)
+            fig_xy.set_size_inches(9, 9.1)
             fig_xy.savefig(filepath_xy)
 
             filepath_t = os.path.join(self.paths["dir_out"], filepath+f"{self.OUTPUT_FNAMES["standard-stepresponses"]}_outliers_t.png")
@@ -1053,7 +1181,7 @@ class PoleSorter():
         ax.set_title(f"Inlier poles (N={pole_array.shape[0]}) sorted by {self.method_complex}: {self.riderbike_model}")
         #ax.set_aspect("equal")
         ax.grid(True)
-        ax.set_xlim(max(np.min(pole_array), -25), 0)
+        ax.set_xlim(max(np.min(np.real(pole_array)), -25), 0)
 
         ax_histreal = fig.add_subplot(gs[1, 0], sharex=ax)
         ax_histreal.set_xlabel("Re")
@@ -1110,37 +1238,46 @@ class PoleSorter():
         ax_histreal.set_xlabel("counts")
 
         # Scatter and hisogram plot
-        sctr_kwargs = {"s": 45, "marker": ".", "edgecolor": "none"}
-        sctr_kwargs_mark = {"s": 45, "marker": "o", "facecolor": "none", "edgecolor": tudcolors.get("rood")}
+        sctr_kwargs = {"s": 20, "marker": "o"}
+        sctr_kwargs_mark = {"s": 30, "marker": "o", "facecolor": "none", "edgecolor": tudcolors.get("rood")}
         histreal_kwargs = {"bins": 50, "alpha": 0.5}
         histimag_kwargs = {"bins": 100, "alpha": 0.5, "orientation":"horizontal"}
 
-        outlier_types = ['outliers_stability', 'outliers_timedomain', 'outliers_configuration', 'outliers_gains', 'outliers_objective'] #'outliers_response_time', 
+        outlier_types = [c for c in self.identifications.columns if "outliers" in c and c!="outliers"]
+        outlier_n = [self.identifications[out].sum() for out in outlier_types]
+
+        idx_sort_n = np.argsort(outlier_n, descending=True)
+        outlier_types = np.array(outlier_types)[idx_sort_n]
+
         pole_keys = [f"pole{i}" for i in range(10) if f"pole{i}" in self.identifications]
+        nr_dominant_pole = np.argmax(np.real(self.identifications[pole_keys].to_numpy()), axis=1).flatten()
+        dominant_pole = self.identifications[pole_keys].to_numpy()[np.arange(nr_dominant_pole.size),nr_dominant_pole]
 
         for i, outlier_type in enumerate(outlier_types):
 
             mask = self.identifications[outlier_type]
 
-            p = np.array(self.identifications[mask][pole_keys])
-            N = p.shape[0]
-            p = p.flatten()
+            pall = self.identifications[pole_keys][mask].to_numpy()
+            pdom = dominant_pole[mask]
+            N = pdom.size
 
-            if not np.any(np.isfinite(p)):
+            if not np.any(np.isfinite(pall)):
                 continue
 
-            ax.scatter(np.real(p), np.imag(p), color=cmap.colors[i], **sctr_kwargs, label=outlier_type + f"(N={N})")
-            ax.scatter(np.real(p), -np.imag(p), color=cmap.colors[i], **sctr_kwargs)
+            ax.scatter(np.real(pall), np.imag(pall), color=cmap.colors[i], facecolor='none', **sctr_kwargs)
+            ax.scatter(np.real(pall), -np.imag(pall), color=cmap.colors[i], facecolor='none', **sctr_kwargs)
+            ax.scatter(np.real(pdom), np.imag(pdom), color=cmap.colors[i], **sctr_kwargs, label=outlier_type + f"(N={N})")
+            ax.scatter(np.real(pdom), -np.imag(pdom), color=cmap.colors[i], **sctr_kwargs)
 
             if np.any(mark[mask]):
                 q = np.array(self.identifications[mask][pole_keys])[mark[mask]].flatten()
                 ax.scatter(np.real(q), np.imag(q), **sctr_kwargs_mark)
                 ax.scatter(np.real(q), -np.imag(q), **sctr_kwargs_mark)
 
-            ax_histreal.hist(np.real(p), color=cmap.colors[i], **histreal_kwargs)
-            ax_histimag.hist(np.concatenate((np.imag(p), -np.imag(p))), color=cmap.colors[i], **histimag_kwargs)
+            ax_histreal.hist(np.real(pdom), color=cmap.colors[i], **histreal_kwargs)
+            ax_histimag.hist(np.concatenate((np.imag(pdom), -np.imag(pdom))), color=cmap.colors[i], **histimag_kwargs)
           
-            if not np.all(np.imag(p) == 0.0):
+            if not np.all(np.imag(pdom) == 0.0):
                 i+=1
         
         ax.legend()
@@ -1153,6 +1290,59 @@ class PoleSorter():
 
 
         return fig, ax, ax_histimag, ax_histreal
+    
+
+    def _print_summary(self):
+
+        summary = []
+
+        print("Pole Outlier Detection Summary")
+        outcols = [c for c in self.identifications.columns if "outliers" in c and c!="outliers"] 
+
+        header = " "*(7+3)
+        for out in outcols:
+            header += f"{out.split("_")[1][:7]:<7}  "
+        header += "|  exclusive"
+        print(header)
+        summary.append(header)
+
+        for outA in outcols:
+            row = f"{outA.split("_")[1][:7]:<7}:  "
+            n_duplicate = 0
+            others = np.zeros(self.identifications.shape[0], dtype=bool)
+            for outB in outcols:
+                N = (self.identifications[outA] & self.identifications[outB]).sum()
+                row += f"{N:>7}  "
+
+                if outB != outA:
+                    others = np.logical_or(others, self.identifications[outB])
+            
+            N = (self.identifications[outA] & ~others).sum()
+            row += f"|  {N:>7}  "
+            print(row)
+            summary.append(row)
+
+        msg_total = f"total outliers:  {self.identifications['outliers'].sum()}/{self.identifications.shape[0]}"
+        msg_valid = f"remaining valid: {self.identifications.shape[0]- self.identifications['outliers'].sum()}/{self.identifications.shape[0]}"
+
+        print(msg_total)
+        print(msg_valid)
+        summary.append(msg_total)
+        summary.append(msg_valid)
+
+        if self.save:
+            filename = f"{self.riderbike_model}_{self.OUTPUT_FNAMES['pole-sorting-result']}_{self.method_complex}_summary.txt"
+            filepath = os.path.join(self.paths['dir_out'], filename)
+
+            summary_intro = ["Pole Outlier Detection Summary"]
+            summary_intro.append("-"*len(summary_intro[0]))
+            summary_intro.append("Number of outliers per outlier category.")
+
+            summary = summary_intro + summary
+
+            with open(filepath, "w") as f:
+                for line in summary:
+                    f.write(line+"\n")
     
     def plot_poles(self):
         """ Plot all poles. Creates a separate plots for inliers and outliers."""
@@ -1252,14 +1442,14 @@ class PoleSorter():
 
         #outliers stability
         n_outliers_stability = np.sum(outliers_stability)
-        print(f"    N(unstable): {n_outliers_stability} ({100*n_outliers_stability/self.identifications.shape[0]:.1f} %)")
+        print(f"   N(unstable): {n_outliers_stability} ({100*n_outliers_stability/self.identifications.shape[0]:.1f} %)")
 
         self.identifications['outliers_stability'] = outliers_stability
         self.identifications['outliers'] = outliers_stability
                       
         #outliers configuration
-        n_outliers_config = np.sum(np.logical_and(outliers_configuration, np.logical_not(self.identifications['outliers'])))
-        print(f"    + N(invalid pole config): {n_outliers_config} ({100*n_outliers_config/self.identifications.shape[0]:.1f} %)")
+        n_outliers_config = np.sum(outliers_configuration)
+        print(f"   N(invalid pole config): {n_outliers_config} ({100*n_outliers_config/self.identifications.shape[0]:.1f} %)")
         
         self.identifications['outliers_configuration'] = outliers_configuration
         self.identifications['outliers'] = np.logical_or(outliers_configuration, self.identifications['outliers'])
@@ -1270,11 +1460,17 @@ class PoleSorter():
         self._find_outliers_gainlimit()
 
         #outliers timedomain
+        self._find_outliers_decay()
         self._find_outliers_timedomain()
+
+        #outliers identifiability
+        self._find_outliers_identifiability()
 
         n_outliers = np.sum(self.identifications['outliers'])
         print(f"    ---------------------")
         print(f"    TOTAL: {n_outliers} ({100*n_outliers/self.identifications.shape[0]:.1f} %)")
+
+        self._print_summary()
 
         if self.save:
             filepath = f"{self.riderbike_model}_{self.OUTPUT_FNAMES['pole-sorting-result']}_{self.method_complex}.csv"
@@ -1722,6 +1918,11 @@ class PoleModel():
         
         #output
         self.save=save
+
+        #scores
+        self.scores_test_ = None
+        self.scores_val_ = None
+        self.scores_calib_ = None
 
     
     def _check_paths(self, paths, save, from_data, has_pole_table):
@@ -2778,8 +2979,44 @@ class PoleModel():
         pm.hyperparameters_ = pd.DataFrame(dict(cov_type=data["gmm_data"]["covariance_type"],
                                    n_components=data["gmm_data"]["n_components"]), index=[0])
         pm.is_fitted_ = True
+
         return pm
 
+
+    def evaluate_calibration(self):
+        X_train, X_test = self.get_datasets()
+
+        levels_train, frequencies_train = self.gmm_.get_calibration_frequencies(X_train)
+        levels_test, frequencies_test = self.gmm_.get_calibration_frequencies(X_test)
+
+        fig, ax = plt.subplots(1,1, layout='constrained')
+        ax.plot(levels_train, frequencies_train, label="training data")
+        ax.plot(levels_test, frequencies_test, label="test data")
+        ax.plot([0,1], [0,1], color='gray', label='best calibration')
+        ax.plot([0,.9], [0.1,1], color='gray', linestyle='dashed')
+        ax.plot([0.1,1], [0,.9], color='gray', linestyle='dashed', label=r'+/- 10% error')
+        ax.legend(loc="upper left")
+        ax.grid()
+
+        mean_error_test = np.mean(np.abs(levels_test - frequencies_test))
+        mean_error_train = np.mean(np.abs(levels_train - frequencies_train))
+
+        ax.set_xlabel("prediced coverage probability")
+        ax.set_ylabel("empirical coverage probability")
+        fig.suptitle((f"Calibration curve model {self.riderbike_model}_{self.feature_set}: Coverage Probability\n"
+                      f"mean absolute calibration errors: MACE_train={mean_error_train:.4f}, MACE_test={mean_error_test:.4f}"))
+
+        self.scores_test_["mace"] = float(mean_error_test)
+
+        probability_coverage = dict(
+            levels_train = levels_train,
+            levels_test = levels_test,
+            frequencies_train = frequencies_train,
+            frequencies_test = frequencies_test
+        )
+        probability_coverage = pd.DataFrame(probability_coverage)
+
+        return fig, ax, probability_coverage
 
 class PoleModelTest():
 
@@ -2889,23 +3126,6 @@ class PoleModelTest():
                     solution_dir = os.path.join(basedir, d, "solutions")
                     plot_dir = os.path.join(basedir, d, "plots")
 
-            # find file
-            pattern = r"trajxy_(\d{1,2})-(\d{1,2}).png"
-            for f in os.listdir(plot_dir):
-                if re.findall(pattern, f):
-                    matches = re.findall(pattern, f)
-                    if int(matches[0][0])==split_id:
-                        solution_filepath = os.path.join(solution_dir, f"sol_{split_id}-{matches[0][1]}.pkl")
-                        break
-
-            #load plotted solution
-            with open(solution_filepath, 'rb') as f:
-                data = pkl.load(f)
-
-            x = np.array(data['solution']['states']['p_x'])
-            y = np.array(data['solution']['states']['p_y'])
-            xy_plotted = np.c_[x,y]
-
             #load resultfile solution
             solution_filepath = os.path.join(solution_dir, f"sol_{split_id}-{guess}.pkl")
             with open(solution_filepath, 'rb') as f:
@@ -2934,7 +3154,7 @@ class PoleModelTest():
         
             s0sim = np.array(s0sim)
 
-            return xy_plotted, xy_resultfile, s0sim
+            return xy_resultfile, xy_resultfile, s0sim
         else:
             return None, None, None
     
@@ -2997,7 +3217,7 @@ class PoleModelTest():
     def _get_identification_result(self, f, trk, i0, p_x_c_shift, p_y_c_shift):
         """ Return the identification result and a simulation of the identified poles of file f."""
         id = self.identifications[f==self.identifications['sample_id']].iloc[0]
-        _, xy_idresult, s0 = self._load_identification_result(str(id['participant']), id['index_x'], id['guess'])
+        _, xy_idresult, s0 = self._load_identification_result(str(id['participant_id']), id['index_in_session'], id['guess_nr'])
         poles_identification = self.identifications[f==self.identifications['sample_id']][self.id_pole_keys].iloc[0].apply(lambda p: complex(p)).to_list()
 
         # target loations
@@ -3116,10 +3336,10 @@ class PoleModelTest():
                 print((f"        Simulating pole predicition {i}: "
                     f"p_0={poles[0]:.2f}, "
                     f"p_1={poles[1]:.2f}, "
-                    f"p_2={poles[2]:.2f}, "))
+                    f"p_2={poles[2]:.2f}"), end="")
             else:
                 print((f"        Simulating pole predicition {i}: "
-                    f"p_0={poles[0]:.2f}, "))
+                    f"p_0={poles[0]:.2f}"), end="")
 
             pred_sim = FixedInputZigZagTest(
                 s0, 
@@ -3132,7 +3352,8 @@ class PoleModelTest():
                 poles = poles,
                 animate=False, 
                 verbose=False)
-            pred_sim.run()
+            trun, frun = pred_sim.run()
+            print(f", t_run={trun:.2f} s, f_run={frun:.0f} Hz")
 
             # evaluate ith prediction
             sample_eval.add_pred_sample(i, pred_sim.bike.traj[0,:i_max], pred_sim.bike.traj[1,:i_max], pred_sim.bike.traj[2,:i_max], labels[i])
@@ -3202,7 +3423,6 @@ class PoleModelTest():
         self.test_results_all_scenes = pd.DataFrame(self.test_results_all_scenes)
         
         self.eval_session()
-        plt.show(block=True)
 
 
     def _aggregate_trajectron_NLL(self, files):
@@ -3279,13 +3499,13 @@ class PoleModelTest():
             else:
                 rng = [0, 1]
             
-            counts, _, _ = ax_nll.hist(self.test_results_all_scenes[m], range=rng, bins=150, label="NLL samples")
+            counts, _, _ = ax_nll.hist(self.test_results_all_scenes[m].to_numpy(), range=rng, label="NLL samples")
             ylim = [0, counts.max()+1]
             ax_nll.plot(np.ones_like(ylim)*mean, ylim, color=tudcolors.get("blauw"), linestyle="dashed", label="mean")
-            ax_nll.annotate(f" mean={mean:.4f}", xy=(mean, 0.55 * np.diff(ylim)),
+            ax_nll.annotate(f" mean={mean:.4f}", xy=(mean, 0.55 * np.diff(ylim)[0]),
                             horizontalalignment='left', verticalalignment='center', color=tudcolors.get("blauw"))
             ax_nll.plot(np.ones_like(ylim)*median, ylim, color=tudcolors.get("blauw"), linestyle="dotted", label="median")
-            ax_nll.annotate(f" median={median:4f}", xy=(median, 0.8 * np.diff(ylim)), 
+            ax_nll.annotate(f" median={median:4f}", xy=(median, 0.8 * np.diff(ylim)[0]), 
                             horizontalalignment='left', verticalalignment='center', color=tudcolors.get("blauw"))
             ax_nll.set_xlim(rng)
             ax_nll.set_ylim(ylim)
@@ -3814,7 +4034,7 @@ class SampleEvaluator():
         for i in range(1, X.shape[1]):
             data = np.array([X[:,i], Y[:,i]])
             pred_dist_i = gaussian_kde(data)
-            nll[i-1] = - pred_dist_i.logpdf([[x[i]],[y[i]]])
+            nll[i-1] = - pred_dist_i.logpdf([[x[i]],[y[i]]])[0]
 
         self.total_metrics['T-NLL'] = nll
 

@@ -77,7 +77,10 @@ def main():
                 fig.set_size_inches(12, 5)
                 fig.savefig(figpath_stats)
 
-    plt.show(block=True)
+    if args.interactive:
+        plt.show(block=True)
+    else:
+        plt.close("all")
 
 if __name__ == "__main__":
     main()
