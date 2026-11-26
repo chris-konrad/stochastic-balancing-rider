@@ -137,6 +137,6 @@ The bicycle parameters in `/packages/rcid/src/rcid/params` are derived from data
 
 If you use this software in your research, please cite our corresponding publication:
 
-Konrad, C. M., Happee, R., Moore, J. K., & Dabiri, A. (in press). *Stochastic Control Behavior of the Balancing Rider for Cycling Safety in Traffic Simulation*. Transportation Research Part C: Emerging Technologies
+Konrad, C. M., Happee, R., Moore, J. K., & Dabiri, A. (2027). *Stochastic control behavior of the balancing rider for cycling safety in traffic simulation*. Transportation Research Part C: Emerging Technologies, 195, 106182. https://doi.org/10.1016/j.trc.2026.106182
 
-The preprint that was later submitted for publication at Transportation Research Part C: Emerging Technologies can be found at https://doi.org/10.31224/6107.  
+The preprint can be found at https://doi.org/10.31224/6107.  
